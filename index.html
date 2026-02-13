@@ -1,0 +1,2174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Valentines Day Game - Happy Valentine's Day</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:100%;height:100%;overflow:hidden;background:#0A1A0D}
+  body{display:flex;align-items:center;justify-content:center}
+  canvas{image-rendering:pixelated;image-rendering:crisp-edges;cursor:default}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+// ============================================================
+//  GARDEN RUNNER — Real Sprite Edition
+//  Uses actual pixel art assets (ansimuz, SunnyLand, etc.)
+// ============================================================
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+// Game canvas (logical resolution, rendered at SCALE× for crisp text)
+const W = 320, H = 180;
+const SCALE = 2;
+
+// Physics constants (cloned from PCB Runner)
+const FOOT_Y = 148;
+const GRAVITY = 580, JUMP_VEL = -230, MAX_RUN = 110;
+const ACCEL = 380, DECEL = 460;
+const COYOTE_MS = 90, JUMP_BUFFER_MS = 90, HIT_SHRINK = 3;
+
+// Player size (matches SunnyLand character ~33x32 but we'll use visible bounds)
+const PW = 20, PH = 28;
+
+const LEVEL_DIST = 800;
+const DEZ_X = LEVEL_DIST * 3 - 40; // Dez waits near end of level in world coords
+
+// Story items — fixed collectibles placed at set distances
+const STORY_ITEMS = [
+  {
+    type: 'bolognese',
+    x: 300,
+    title: 'Bowl of Bolognese',
+    note: "Your food makes me so happy.\nI'm so blessed to get to\neat it every single day.\nHaving someone who's such an\namazing cook in my life\nis a gift I never take\nfor granted.",
+  },
+  {
+    type: 'celine',
+    x: 900,
+    yOverride: FOOT_Y - 80,
+    platforms: [
+      { x: 870, y: FOOT_Y - 38, w: 40 },
+      { x: 890, y: FOOT_Y - 68, w: 40 },
+    ],
+    title: 'Celine Boston Bag',
+    note: "You deserve the finest things\nin life. Every beautiful thing\nyou own still can't compete\nwith how beautiful you are\nwearing it.",
+  },
+  {
+    type: 'balance',
+    x: 1500,
+    title: 'Balance of Life',
+    note: "Nothing in the world is\nas good as having you.\nI would trade it all\njust to have you.",
+  },
+];
+const TOTAL_LETTERS = STORY_ITEMS.length;
+
+// ============================================================
+//  IMAGE LOADING
+// ============================================================
+const IMG_LIST = {
+  bgBack:      'img/bg-back.png',
+  bgMid:       'img/bg-mid.png',
+  bgFront:     'img/bg-front.png',
+  bgLights:    'img/bg-lights.png',
+  // Dark forest biome (first half)
+  darkBack:    'img/dark-back.png',
+  darkMid:     'img/dark-mid.png',
+  darkMid2:    'img/dark-mid2.png',
+  darkFront:   'img/dark-front.png',
+  darkLights:  'img/dark-lights.png',
+  darkLights2: 'img/dark-lights2.png',
+  // Oak Woods biome (second half)
+  oakBack:     'img/oak-back.png',
+  oakMid:      'img/oak-mid.png',
+  oakFront:    'img/oak-front.png',
+  // Game sprites
+  playerIdle:  'img/player-idle.png',
+  playerRun:   'img/player-run.png',
+  playerJump:  'img/player-jump.png',
+  playerHurt:  'img/player-hurt.png',
+  dog:         'img/dog.png',
+  gem:         'img/gem.png',
+  cherry:      'img/cherry.png',
+  rock:        'img/rock.png',
+  mushroom:    'img/mushroom.png',
+  bush:        'img/bush.png',
+  platform:    'img/platform.png',
+  moss:        'img/moss.png',
+  plant:       'img/plant.png',
+};
+
+const img = {};
+let loadCount = 0;
+const totalImages = Object.keys(IMG_LIST).length;
+
+function loadImages(callback) {
+  for (const [key, src] of Object.entries(IMG_LIST)) {
+    const i = new Image();
+    i.onload = () => { img[key] = i; loadCount++; if (loadCount >= totalImages) callback(); };
+    i.onerror = () => { console.warn('Missing:', src); loadCount++; if (loadCount >= totalImages) callback(); };
+    i.src = src;
+  }
+}
+
+// ============================================================
+//  SPRITE FRAME DEFINITIONS
+// ============================================================
+// SunnyLand player: each frame 33x32
+const PLAYER_FRAME = { w: 33, h: 32 };
+const PLAYER_IDLE_FRAMES = 4;
+const PLAYER_RUN_FRAMES = 6;
+const PLAYER_JUMP_FRAMES = 2;
+const PLAYER_HURT_FRAMES = 2;
+
+// Dog spritesheet: 96x80, 16x16 frames, 6 cols x 5 rows
+// Row 0: Idle, Row 1: Walk, Row 2: Run, Row 3: Jump, Row 4: Fall/Attack
+const DOG_FRAME = { w: 16, h: 16 };
+const DOG_COLS = 6;
+
+// Gem: 75x13, 5 frames of 15x13
+const GEM_FRAME = { w: 15, h: 13 };
+const GEM_FRAMES = 5;
+
+// Cherry: 105x21, 5 frames of 21x21
+const CHERRY_FRAME = { w: 21, h: 21 };
+const CHERRY_FRAMES = 5;
+
+// ============================================================
+//  PROGRAMMATIC SPRITES (hearts, letters, flowers)
+// ============================================================
+let sprHeart, sprLetter, sprFlower, sprBolognese, sprCeline, sprBalance, sprBoulder;
+
+function makeCanvas(w, h) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  return c;
+}
+
+function prerenderSpecialSprites() {
+  // Heart (11x10)
+  sprHeart = makeCanvas(11, 10);
+  const hc = sprHeart.getContext('2d');
+  hc.fillStyle = '#FF1744';
+  // pixel heart shape
+  const heart = [
+    [0,1,1,0,0,0,1,1,0,0,0],
+    [1,1,1,1,0,1,1,1,1,0,0],
+    [1,1,1,1,1,1,1,1,1,0,0],
+    [1,1,1,1,1,1,1,1,1,0,0],
+    [0,1,1,1,1,1,1,1,0,0,0],
+    [0,0,1,1,1,1,1,0,0,0,0],
+    [0,0,0,1,1,1,0,0,0,0,0],
+    [0,0,0,0,1,0,0,0,0,0,0],
+  ];
+  heart.forEach((row, y) => row.forEach((v, x) => {
+    if (v) { hc.fillStyle = y < 2 ? '#FF5080' : '#FF1744'; hc.fillRect(x, y, 1, 1); }
+  }));
+  // Highlight
+  hc.fillStyle = '#FF8090';
+  hc.fillRect(2, 1, 1, 1); hc.fillRect(1, 2, 1, 1);
+
+  // Letter (12x10)
+  sprLetter = makeCanvas(12, 10);
+  const lc = sprLetter.getContext('2d');
+  lc.fillStyle = '#FFF0D0';
+  lc.fillRect(1, 1, 10, 8);
+  lc.fillStyle = '#E8D8A0';
+  lc.fillRect(1, 1, 10, 1); lc.fillRect(1, 8, 10, 1);
+  lc.fillRect(1, 1, 1, 8); lc.fillRect(10, 1, 1, 8);
+  // Seal
+  lc.fillStyle = '#FF1744';
+  lc.fillRect(4, 3, 4, 4);
+  lc.fillStyle = '#FF5060';
+  lc.fillRect(5, 4, 2, 2);
+  // Gold trim
+  lc.fillStyle = '#FFD700';
+  lc.fillRect(0, 0, 12, 1); lc.fillRect(0, 9, 12, 1);
+
+  // Bolognese pasta bowl (16x14)
+  sprBolognese = makeCanvas(16, 14);
+  const bc = sprBolognese.getContext('2d');
+  // Bowl (white ceramic)
+  bc.fillStyle = '#E8E0D8';
+  for (let bx = 3; bx <= 12; bx++) bc.fillRect(bx, 8, 1, 1);  // rim top
+  for (let bx = 2; bx <= 13; bx++) bc.fillRect(bx, 9, 1, 1);  // upper bowl
+  for (let bx = 2; bx <= 13; bx++) bc.fillRect(bx, 10, 1, 1);
+  for (let bx = 3; bx <= 12; bx++) bc.fillRect(bx, 11, 1, 1);
+  for (let bx = 4; bx <= 11; bx++) bc.fillRect(bx, 12, 1, 1);  // bottom
+  for (let bx = 5; bx <= 10; bx++) bc.fillRect(bx, 13, 1, 1);  // base
+  // Bowl highlight
+  bc.fillStyle = '#F8F4F0';
+  bc.fillRect(4, 9, 2, 1); bc.fillRect(3, 10, 1, 1);
+  // Bowl shadow
+  bc.fillStyle = '#C8C0B8';
+  bc.fillRect(12, 10, 1, 1); bc.fillRect(11, 11, 1, 1);
+  // Red sauce (bolognese)
+  bc.fillStyle = '#C03020';
+  for (let bx = 4; bx <= 11; bx++) bc.fillRect(bx, 6, 1, 1);
+  for (let bx = 3; bx <= 12; bx++) bc.fillRect(bx, 7, 1, 1);
+  bc.fillStyle = '#D84030';
+  bc.fillRect(5, 6, 3, 1); bc.fillRect(4, 7, 2, 1);
+  // Pasta strands (yellow spaghetti poking through)
+  bc.fillStyle = '#F0D060';
+  bc.fillRect(5, 5, 1, 1); bc.fillRect(7, 4, 1, 2); bc.fillRect(9, 5, 1, 1);
+  bc.fillRect(10, 4, 1, 1); bc.fillRect(6, 7, 1, 1); bc.fillRect(10, 7, 1, 1);
+  bc.fillStyle = '#E8C040';
+  bc.fillRect(4, 4, 1, 1); bc.fillRect(11, 5, 1, 1);
+  // Basil garnish (green)
+  bc.fillStyle = '#40A030';
+  bc.fillRect(7, 5, 2, 1);
+  bc.fillStyle = '#50B840';
+  bc.fillRect(8, 4, 1, 1);
+  // Steam wisps
+  bc.fillStyle = 'rgba(255,255,255,0.4)';
+  bc.fillRect(6, 2, 1, 1); bc.fillRect(9, 1, 1, 1); bc.fillRect(8, 3, 1, 1);
+
+  // Celine Boston bag (14x12) - dark brown body, lighter brown handles, gold hardware
+  sprCeline = makeCanvas(14, 12);
+  const cc = sprCeline.getContext('2d');
+  const CB = '#4A2A14', CB_L = '#5C3820', CB_D = '#3A1E0C';  // body: dark brown
+  const CH = '#9C7048', CH_L = '#B88860', CH_D = '#7C5838';   // handles: lighter brown
+  const GOLD = '#D4A830', GOLD_L = '#E8C850';
+  // Bag body (rounded boston shape)
+  cc.fillStyle = CB;
+  for (let bx = 2; bx <= 11; bx++) cc.fillRect(bx, 3, 1, 1);  // top
+  for (let bx = 1; bx <= 12; bx++) { cc.fillRect(bx, 4, 1, 1); cc.fillRect(bx, 5, 1, 1); cc.fillRect(bx, 6, 1, 1); cc.fillRect(bx, 7, 1, 1); }
+  for (let bx = 2; bx <= 11; bx++) cc.fillRect(bx, 8, 1, 1);  // bottom curve
+  for (let bx = 3; bx <= 10; bx++) cc.fillRect(bx, 9, 1, 1);  // base
+  // Triomphe pattern (subtle interlocking arcs)
+  cc.fillStyle = CB_D;
+  cc.fillRect(3, 5, 1, 1); cc.fillRect(5, 4, 1, 1); cc.fillRect(7, 5, 1, 1); cc.fillRect(9, 4, 1, 1); cc.fillRect(11, 5, 1, 1);
+  cc.fillRect(4, 7, 1, 1); cc.fillRect(6, 6, 1, 1); cc.fillRect(8, 7, 1, 1); cc.fillRect(10, 6, 1, 1);
+  // Highlight
+  cc.fillStyle = CB_L;
+  cc.fillRect(3, 4, 3, 1); cc.fillRect(2, 5, 1, 1);
+  // Trim edges (body color, slightly lighter)
+  cc.fillStyle = CB_L;
+  cc.fillRect(2, 3, 10, 1);  // top trim
+  cc.fillRect(3, 9, 8, 1);   // bottom trim
+  cc.fillRect(1, 4, 1, 1); cc.fillRect(12, 4, 1, 1);  // side trim
+  cc.fillRect(1, 7, 1, 1); cc.fillRect(12, 7, 1, 1);
+  // Handles (lighter brown)
+  cc.fillStyle = CH;
+  cc.fillRect(4, 2, 1, 1); cc.fillRect(9, 2, 1, 1);  // handle base
+  cc.fillRect(4, 1, 2, 1); cc.fillRect(8, 1, 2, 1);   // handle mid
+  cc.fillRect(5, 0, 4, 1);                              // handle top
+  cc.fillStyle = CH_L;
+  cc.fillRect(6, 0, 2, 1);  // handle highlight
+  // Gold hardware (clasp + zipper line)
+  cc.fillStyle = GOLD;
+  cc.fillRect(6, 3, 2, 1);  // clasp
+  cc.fillStyle = GOLD_L;
+  cc.fillRect(7, 3, 1, 1);  // clasp shine
+  // Gold buckle detail
+  cc.fillStyle = GOLD;
+  cc.fillRect(4, 2, 1, 1); cc.fillRect(9, 2, 1, 1);
+
+  // Balance beam / scale (22x18) - money+synths vs TORI (TORI side heavier)
+  sprBalance = makeCanvas(22, 18);
+  const sc = sprBalance.getContext('2d');
+  // Fulcrum (triangle)
+  sc.fillStyle = '#8B7355';
+  sc.fillRect(10, 13, 2, 3); sc.fillRect(9, 16, 4, 2); // post + base
+  sc.fillStyle = '#A0906E';
+  sc.fillRect(9, 12, 4, 1); // top of fulcrum
+  // Beam (tilted — right/TORI side heavier = lower)
+  sc.fillStyle = '#C0A878';
+  // Left side (money — higher, y=6)
+  for (var bi = 1; bi <= 9; bi++) sc.fillRect(bi, 6, 1, 1);
+  // Right side (TORI — lower, y=9)
+  for (var bi = 12; bi <= 20; bi++) sc.fillRect(bi, 9, 1, 1);
+  // Connect to center
+  sc.fillRect(10, 7, 1, 1); sc.fillRect(11, 8, 1, 1);
+  // Left pan chains
+  sc.fillStyle = '#887050';
+  sc.fillRect(2, 7, 1, 2); sc.fillRect(8, 7, 1, 2);
+  // Left pan (shallow dish)
+  sc.fillStyle = '#A09070';
+  for (var bi = 1; bi <= 9; bi++) sc.fillRect(bi, 9, 1, 1);
+  sc.fillRect(1, 8, 1, 1); sc.fillRect(9, 8, 1, 1);
+  // Money on left pan
+  sc.fillStyle = '#4CAF50'; // green bills
+  sc.fillRect(2, 7, 3, 2); sc.fillRect(3, 6, 2, 1);
+  sc.fillStyle = '#FFD700'; // gold coins
+  sc.fillRect(5, 7, 2, 2);
+  // Tiny synth keyboard on left
+  sc.fillStyle = '#333';
+  sc.fillRect(7, 7, 2, 1);
+  sc.fillStyle = '#EEE';
+  sc.fillRect(7, 8, 1, 1);
+  // Right pan chains
+  sc.fillStyle = '#887050';
+  sc.fillRect(13, 10, 1, 2); sc.fillRect(19, 10, 1, 2);
+  // Right pan
+  sc.fillStyle = '#A09070';
+  for (var bi = 12; bi <= 20; bi++) sc.fillRect(bi, 12, 1, 1);
+  sc.fillRect(12, 11, 1, 1); sc.fillRect(20, 11, 1, 1);
+  // Heart on right pan (representing TORI / love)
+  sc.fillStyle = '#FF1744';
+  sc.fillRect(14, 9, 1, 1); sc.fillRect(17, 9, 1, 1);
+  sc.fillRect(14, 10, 4, 1);
+  sc.fillRect(15, 11, 2, 1);
+  // Pink glow
+  sc.fillStyle = '#FF88B8';
+  sc.fillRect(15, 9, 2, 1);
+
+  // Boulder (60x45) — big imposing rock
+  sprBoulder = makeCanvas(60, 45);
+  const boc = sprBoulder.getContext('2d');
+  for (var by = 0; by < 45; by++) {
+    for (var bx = 0; bx < 60; bx++) {
+      var dx = (bx - 30) / 29, dy = (by - 22) / 21;
+      var dist = dx * dx + dy * dy;
+      if (dist > 1) continue;
+      var hash = ((bx * 7 + by * 13 + 37) * 2654435761) >>> 0;
+      var noise = (hash % 100) / 100;
+      if (dist < 0.3) boc.fillStyle = noise > 0.5 ? '#8A8A8A' : '#7E7E7E';
+      else if (dist < 0.7) boc.fillStyle = noise > 0.5 ? '#6E6E6E' : '#626262';
+      else boc.fillStyle = noise > 0.6 ? '#565656' : '#4A4A4A';
+      boc.fillRect(bx, by, 1, 1);
+    }
+  }
+  // Cracks
+  boc.fillStyle = '#3A3A3A';
+  boc.fillRect(22, 15, 1, 7); boc.fillRect(23, 21, 4, 1);
+  boc.fillRect(38, 12, 1, 6); boc.fillRect(39, 17, 3, 1);
+  boc.fillRect(27, 27, 5, 1); boc.fillRect(31, 25, 1, 3);
+  boc.fillRect(15, 20, 1, 4); boc.fillRect(16, 23, 2, 1);
+  // Top highlight
+  boc.fillStyle = '#9A9A9A';
+  boc.fillRect(18, 6, 12, 1); boc.fillRect(15, 7, 8, 1);
+  boc.fillRect(21, 5, 6, 1); boc.fillRect(34, 8, 6, 1);
+
+  // Flower (9x11)
+  sprFlower = makeCanvas(9, 11);
+  const fc = sprFlower.getContext('2d');
+  // Stem
+  fc.fillStyle = '#3A8830';
+  fc.fillRect(4, 5, 1, 6);
+  fc.fillStyle = '#4AA840';
+  fc.fillRect(3, 7, 1, 2); fc.fillRect(5, 8, 1, 2);
+  // Petals
+  fc.fillStyle = '#FF88B8';
+  fc.fillRect(3, 0, 3, 1); fc.fillRect(2, 1, 5, 1);
+  fc.fillRect(1, 2, 7, 1); fc.fillRect(1, 3, 7, 1);
+  fc.fillRect(2, 4, 5, 1); fc.fillRect(3, 5, 3, 1);
+  // Center
+  fc.fillStyle = '#FFD700';
+  fc.fillRect(3, 2, 3, 2);
+  // Highlight
+  fc.fillStyle = '#FFB0D0';
+  fc.fillRect(2, 1, 2, 1); fc.fillRect(1, 2, 1, 1);
+}
+
+// ============================================================
+//  CUSTOM CHARACTER SPRITE GENERATOR
+//  Designed to match Tori - curly hair, warm brown skin
+// ============================================================
+function generateCharacterSprites() {
+  const fw = PLAYER_FRAME.w, fh = PLAYER_FRAME.h; // 33x32
+
+  // Color palette
+  const HD = '#080200';   // hair darkest (near black)
+  const HM = '#140800';   // hair mid (very dark brown)
+  const HL = '#221008';   // hair highlight (curl edges)
+  const HX = '#2A1810';   // hair extra light
+  const SK = '#C08860';   // skin
+  const SS = '#A07048';   // skin shadow
+  const SL = '#D8A078';   // skin highlight
+  const EY = '#101010';   // eye pupil
+  const EW = '#F0F0F0';   // eye white
+  const LP = '#C06858';   // lips
+  const BL = '#D89878';   // blush
+  // Sunday dress - soft muted pink
+  const DD = '#D08898';   // dress main
+  const DL = '#E0A0B0';   // dress light
+  const DS = '#B07080';   // dress shadow
+  const DW = '#F0D0D8';   // dress lace/trim
+  const SH = '#483028';   // shoes (nice church shoes)
+  const SHH = '#604838';  // shoes highlight
+  // Flower hairband colors
+  const FP = '#FF6090';   // pink flower
+  const FY = '#FFD840';   // yellow flower
+  const FW = '#F0E8F0';   // white flower
+  const FG = '#48A038';   // green leaf/band
+
+  function px(c, x, y) { c.fillRect(x, y, 1, 1); }
+
+  function drawHair(c, cx, cy, bounce) {
+    const by = bounce || 0;
+    for (let py = -6; py <= 11; py++) {
+      for (let ppx = -9; ppx <= 9; ppx++) {
+        const dx = ppx / 9.5, dy = (py + by) / (py < 0 ? 7 : 11);
+        const dist = dx * dx + dy * dy;
+        const hash = ((ppx * 7 + py * 13 + 37) * 2654435761) >>> 0;
+        const noise = Math.sin(ppx * 1.3 + py * 0.7) * 0.06 + Math.sin(ppx * 0.5 - py * 1.5) * 0.05;
+        const edgeR = 0.85 + noise;
+        if (dist > edgeR) {
+          if (dist < edgeR + 0.12 && (hash % 3) === 0) {
+            c.fillStyle = HD; px(c, cx + ppx, cy + py);
+          }
+          continue;
+        }
+        const curl = (hash % 100) / 100;
+        const yFactor = (py + 8) / 15;
+        if (yFactor < 0.25) {
+          c.fillStyle = curl > 0.6 ? HL : curl > 0.25 ? HM : HD;
+        } else if (yFactor < 0.6) {
+          c.fillStyle = curl > 0.7 ? HX : curl > 0.4 ? HM : HD;
+        } else {
+          c.fillStyle = curl > 0.6 ? HM : HD;
+        }
+        const ringDist = Math.abs(dist - 0.4);
+        if (ringDist < 0.08 && curl > 0.5) c.fillStyle = HL;
+        px(c, cx + ppx, cy + py);
+      }
+    }
+  }
+
+  function drawHairband(c, cx, cy, bounce) {
+    // Flower hairband across the top-front of the hair
+    const by = bounce || 0;
+    const bandY = cy - 4 + by; // sits on top of hair
+    // Green band base
+    for (let bx = -6; bx <= 6; bx++) {
+      // Curved band follows hair shape
+      const curve = Math.round(Math.abs(bx) * 0.3);
+      c.fillStyle = FG;
+      px(c, cx + bx, bandY + curve);
+    }
+    // Flowers along the band
+    const flowers = [
+      { x: -5, col: FP }, { x: -2, col: FY }, { x: 1, col: FW },
+      { x: 4, col: FP }, { x: 6, col: FY },
+    ];
+    for (const f of flowers) {
+      const curve = Math.round(Math.abs(f.x) * 0.3);
+      const fy = bandY + curve;
+      c.fillStyle = f.col;
+      px(c, cx + f.x, fy - 1);        // top petal
+      px(c, cx + f.x - 1, fy);        // left petal
+      px(c, cx + f.x + 1, fy);        // right petal
+      px(c, cx + f.x, fy);            // center
+      c.fillStyle = '#FFE840';         // yellow center
+      px(c, cx + f.x, fy);
+    }
+  }
+
+  function drawFace(c, cx, cy) {
+    for (let py = -3; py <= 4; py++) {
+      const hw = py <= 0 ? 4 : (py <= 2 ? 4 : (py <= 3 ? 3 : 2));
+      for (let ppx = -hw; ppx <= hw; ppx++) {
+        c.fillStyle = ppx < -2 ? SS : (ppx > 2 ? SS : SK);
+        px(c, cx + ppx, cy + py);
+      }
+    }
+    c.fillStyle = SL;
+    px(c, cx + 1, cy - 3); px(c, cx + 2, cy - 2);
+    c.fillStyle = EW;
+    px(c, cx - 2, cy - 1); px(c, cx + 2, cy - 1);
+    c.fillStyle = EY;
+    px(c, cx - 1, cy - 1); px(c, cx + 3, cy - 1);
+    c.fillStyle = BL;
+    px(c, cx - 3, cy + 1); px(c, cx + 4, cy + 1);
+    c.fillStyle = LP;
+    px(c, cx, cy + 2); px(c, cx + 1, cy + 2);
+    c.fillStyle = SS;
+    px(c, cx + 1, cy);
+  }
+
+  function drawDress(c, ox, oy, armLOff, armROff) {
+    // Neck
+    c.fillStyle = SK;
+    px(c, ox, oy); px(c, ox + 1, oy);
+    c.fillStyle = SS;
+    px(c, ox - 1, oy);
+
+    // Bodice (fitted top of dress)
+    for (let py = 1; py <= 4; py++) {
+      const hw = py <= 2 ? 5 : 5;
+      for (let ppx = -hw; ppx <= hw; ppx++) {
+        c.fillStyle = ppx < -3 ? DS : (ppx > 3 ? DS : (py < 2 ? DL : DD));
+        px(c, ox + ppx, oy + py);
+      }
+    }
+    // Neckline
+    c.fillStyle = SK;
+    px(c, ox - 1, oy + 1); px(c, ox, oy + 1); px(c, ox + 1, oy + 1);
+    // White lace trim at neckline
+    c.fillStyle = DW;
+    px(c, ox - 2, oy + 1); px(c, ox + 2, oy + 1);
+
+    // Skirt (flares out, knee-length Sunday dress)
+    for (let py = 5; py <= 12; py++) {
+      const flare = Math.floor((py - 4) * 0.6);
+      const hw = 5 + flare;
+      for (let ppx = -hw; ppx <= hw; ppx++) {
+        const edge = Math.abs(ppx) >= hw - 1;
+        const fold = (ppx + py) % 4 === 0; // subtle fold lines
+        c.fillStyle = edge ? DS : fold ? DS : (py < 8 ? DD : DL);
+        px(c, ox + ppx, oy + py);
+      }
+    }
+    // Hem trim
+    const hemHw = 5 + Math.floor(8 * 0.6);
+    for (let ppx = -hemHw; ppx <= hemHw; ppx++) {
+      c.fillStyle = DW;
+      px(c, ox + ppx, oy + 12);
+    }
+
+    // Arms (short sleeves)
+    const laY = oy + 2 + (armLOff || 0);
+    // Left sleeve
+    c.fillStyle = DD;
+    px(c, ox - 6, laY); px(c, ox - 7, laY);
+    c.fillStyle = DL;
+    px(c, ox - 6, laY + 1); px(c, ox - 7, laY + 1);
+    // Left bare arm
+    c.fillStyle = SK;
+    for (let ay = 2; ay < 5; ay++) { px(c, ox - 6, laY + ay); px(c, ox - 7, laY + ay); }
+    c.fillStyle = SS;
+    px(c, ox - 6, laY + 5); px(c, ox - 7, laY + 5); // hand
+
+    const raY = oy + 2 + (armROff || 0);
+    // Right sleeve
+    c.fillStyle = DD;
+    px(c, ox + 6, raY); px(c, ox + 7, raY);
+    c.fillStyle = DL;
+    px(c, ox + 6, raY + 1); px(c, ox + 7, raY + 1);
+    // Right bare arm
+    c.fillStyle = SK;
+    for (let ay = 2; ay < 5; ay++) { px(c, ox + 6, raY + ay); px(c, ox + 7, raY + ay); }
+    c.fillStyle = SS;
+    px(c, ox + 6, raY + 5); px(c, ox + 7, raY + 5); // hand
+  }
+
+  function drawLegs(c, ox, oy, lOff, rOff) {
+    // Bare legs below dress (longer legs)
+    const lx = ox - 2 + (lOff || 0);
+    for (let ly = 0; ly < 8; ly++) {
+      c.fillStyle = ly % 3 === 0 ? SS : SK;
+      px(c, lx, oy + ly); px(c, lx + 1, oy + ly); px(c, lx + 2, oy + ly);
+    }
+    // Left shoe (nice church shoe)
+    c.fillStyle = SH;
+    px(c, lx - 1, oy + 8); px(c, lx, oy + 8);
+    c.fillStyle = SHH;
+    px(c, lx + 1, oy + 8); px(c, lx + 2, oy + 8);
+
+    const rx = ox + 1 + (rOff || 0);
+    for (let ly = 0; ly < 8; ly++) {
+      c.fillStyle = ly % 3 === 0 ? SS : SK;
+      px(c, rx, oy + ly); px(c, rx + 1, oy + ly); px(c, rx + 2, oy + ly);
+    }
+    // Right shoe
+    c.fillStyle = SH;
+    px(c, rx - 1, oy + 8); px(c, rx, oy + 8);
+    c.fillStyle = SHH;
+    px(c, rx + 1, oy + 8); px(c, rx + 2, oy + 8);
+  }
+
+  function drawCharFrame(ctx, fx, pose) {
+    const cx = fx + 16;
+    // Layout: shifted down so rounded hair top is visible
+    const hairY = 5, faceY = 7, bodyY = 12, legY = 23;
+    const hBounce = pose.hairBounce || 0;
+
+    drawHair(ctx, cx, hairY + hBounce, hBounce);
+    drawHairband(ctx, cx, hairY, 0);
+    drawFace(ctx, cx, faceY);
+    drawDress(ctx, cx, bodyY, pose.armL || 0, pose.armR || 0);
+    drawLegs(ctx, cx, legY, pose.legL || 0, pose.legR || 0);
+  }
+
+  // --- IDLE (4 frames) ---
+  const idleC = makeCanvas(fw * 4, fh);
+  const idleX = idleC.getContext('2d');
+  const idlePoses = [
+    { hairBounce: 0, armL: 0, armR: 0, legL: 0, legR: 0 },
+    { hairBounce: -1, armL: 0, armR: 0, legL: 0, legR: 0 },
+    { hairBounce: 0, armL: 0, armR: 0, legL: 0, legR: 0 },
+    { hairBounce: 1, armL: 0, armR: 0, legL: 0, legR: 0 },
+  ];
+  for (let i = 0; i < 4; i++) drawCharFrame(idleX, i * fw, idlePoses[i]);
+  img.playerIdle = idleC;
+
+  // --- RUN (6 frames) ---
+  const runC = makeCanvas(fw * 6, fh);
+  const runX = runC.getContext('2d');
+  const runPoses = [
+    { hairBounce: -1, armL: -2, armR: 2, legL: -2, legR: 2 },
+    { hairBounce: -2, armL: -1, armR: 1, legL: -1, legR: 1 },
+    { hairBounce: 0, armL: 0, armR: 0, legL: 0, legR: 0 },
+    { hairBounce: -1, armL: 2, armR: -2, legL: 2, legR: -2 },
+    { hairBounce: -2, armL: 1, armR: -1, legL: 1, legR: -1 },
+    { hairBounce: 0, armL: 0, armR: 0, legL: 0, legR: 0 },
+  ];
+  for (let i = 0; i < 6; i++) drawCharFrame(runX, i * fw, runPoses[i]);
+  img.playerRun = runC;
+
+  // --- JUMP (2 frames) ---
+  const jumpC = makeCanvas(fw * 2, fh);
+  const jumpX = jumpC.getContext('2d');
+  drawCharFrame(jumpX, 0, { hairBounce: 2, armL: -3, armR: -3, legL: 0, legR: 0 });
+  drawCharFrame(jumpX, fw, { hairBounce: -2, armL: 2, armR: 2, legL: 1, legR: -1 });
+  img.playerJump = jumpC;
+
+  // --- HURT (2 frames) ---
+  const hurtC = makeCanvas(fw * 2, fh);
+  const hurtX = hurtC.getContext('2d');
+  drawCharFrame(hurtX, 0, { hairBounce: 1, armL: 2, armR: -2, legL: -1, legR: 1 });
+  drawCharFrame(hurtX, fw, { hairBounce: -1, armL: -2, armR: 2, legL: 1, legR: -1 });
+  img.playerHurt = hurtC;
+}
+
+// ============================================================
+//  DEZ CHARACTER SPRITE GENERATOR
+//  Male character — warm brown skin, short hair, casual fit
+// ============================================================
+// Dez frame is taller than Tori (36px vs 32px), drawn scaled up
+const DEZ_FRAME = { w: 33, h: 36 };
+const DEZ_SCALE = 1.15;
+
+function generateDezSprite() {
+  const fw = DEZ_FRAME.w, fh = DEZ_FRAME.h;
+
+  // Color palette — light skin tone
+  const SK = '#EABD8B';   // skin (light warm)
+  const SS = '#D0A070';   // skin shadow
+  const SL = '#F5D8B0';   // skin highlight
+  const HR = '#181010';   // hair (dark)
+  const HR_L = '#281810'; // hair highlight
+  const EY = '#101010';   // eyes
+  const EW = '#F0F0F0';   // eye whites
+  // Outfit — casual dark hoodie + jeans
+  const HD = '#2A2A3A';   // hoodie main
+  const HL = '#383848';   // hoodie light
+  const HDS = '#1E1E28';  // hoodie shadow
+  const JN = '#3A4868';   // jeans
+  const JL = '#4A5878';   // jeans light
+  const JS = '#2A3858';   // jeans shadow
+  const SHO = '#202020';  // shoes
+  const SHL = '#383838';  // shoes highlight
+
+  function px(c, x, y) { c.fillRect(x, y, 1, 1); }
+
+  function drawDezFrame(c, fx, pose) {
+    const cx = fx + 16;
+    const hBounce = pose.hairBounce || 0;
+
+    // Hair (short, low profile — flat top/fade style)
+    const headTop = 5 + hBounce;
+    for (let py = 0; py <= 3; py++) {
+      const hw = py === 0 ? 3 : (py === 1 ? 4 : (py <= 3 ? 5 : 4));
+      for (let ppx = -hw; ppx <= hw; ppx++) {
+        const hash = ((ppx * 7 + py * 13 + 37) * 2654435761) >>> 0;
+        c.fillStyle = (hash % 4) === 0 ? HR_L : HR;
+        px(c, cx + ppx, headTop + py);
+      }
+    }
+
+    // Face
+    const faceY = 9;
+    for (let py = -2; py <= 4; py++) {
+      const hw = py <= 0 ? 4 : (py <= 2 ? 4 : (py <= 3 ? 3 : 2));
+      for (let ppx = -hw; ppx <= hw; ppx++) {
+        c.fillStyle = ppx < -2 ? SS : (ppx > 2 ? SS : SK);
+        px(c, cx + ppx, faceY + py);
+      }
+    }
+    // Highlight
+    c.fillStyle = SL;
+    px(c, cx + 1, faceY - 2); px(c, cx + 2, faceY - 1);
+    // Eyes
+    c.fillStyle = EW;
+    px(c, cx - 2, faceY); px(c, cx + 2, faceY);
+    c.fillStyle = EY;
+    px(c, cx - 1, faceY); px(c, cx + 3, faceY);
+    // Nose
+    c.fillStyle = SS;
+    px(c, cx + 1, faceY + 1);
+    // Smile
+    c.fillStyle = SK;
+    px(c, cx - 1, faceY + 3); px(c, cx + 2, faceY + 3);
+    c.fillStyle = SS;
+    px(c, cx, faceY + 3); px(c, cx + 1, faceY + 3);
+
+    // Neck
+    const bodyY = 14;
+    c.fillStyle = SK;
+    px(c, cx, bodyY); px(c, cx + 1, bodyY);
+    c.fillStyle = SS;
+    px(c, cx - 1, bodyY);
+
+    // Hoodie (broader shoulders, longer torso)
+    for (let py = 1; py <= 12; py++) {
+      const hw = py <= 2 ? 6 : (py <= 6 ? 6 : 5);
+      for (let ppx = -hw; ppx <= hw; ppx++) {
+        const edge = Math.abs(ppx) >= hw - 1;
+        c.fillStyle = edge ? HDS : (py < 3 ? HL : HD);
+        px(c, cx + ppx, bodyY + py);
+      }
+    }
+    // Hood strings
+    c.fillStyle = HL;
+    px(c, cx - 1, bodyY + 2); px(c, cx + 1, bodyY + 2);
+    // Pocket line
+    c.fillStyle = HDS;
+    for (let ppx = -4; ppx <= 4; ppx++) px(c, cx + ppx, bodyY + 9);
+
+    // Arms
+    const laY = bodyY + 2 + (pose.armL || 0);
+    c.fillStyle = HD;
+    px(c, cx - 7, laY); px(c, cx - 8, laY);
+    c.fillStyle = HL;
+    px(c, cx - 7, laY + 1); px(c, cx - 8, laY + 1);
+    c.fillStyle = SK;
+    for (let ay = 2; ay < 5; ay++) { px(c, cx - 7, laY + ay); px(c, cx - 8, laY + ay); }
+    c.fillStyle = SS;
+    px(c, cx - 7, laY + 5); px(c, cx - 8, laY + 5);
+
+    const raY = bodyY + 2 + (pose.armR || 0);
+    c.fillStyle = HD;
+    px(c, cx + 7, raY); px(c, cx + 8, raY);
+    c.fillStyle = HL;
+    px(c, cx + 7, raY + 1); px(c, cx + 8, raY + 1);
+    c.fillStyle = SK;
+    for (let ay = 2; ay < 5; ay++) { px(c, cx + 7, raY + ay); px(c, cx + 8, raY + ay); }
+    c.fillStyle = SS;
+    px(c, cx + 7, raY + 5); px(c, cx + 8, raY + 5);
+
+    // Jeans (longer legs)
+    const legY = bodyY + 13;
+    const lx = cx - 3 + (pose.legL || 0);
+    for (let ly = 0; ly < 7; ly++) {
+      c.fillStyle = ly % 3 === 0 ? JS : JN;
+      px(c, lx, legY + ly); px(c, lx + 1, legY + ly); px(c, lx + 2, legY + ly);
+    }
+    c.fillStyle = SHO;
+    px(c, lx - 1, legY + 7); px(c, lx, legY + 7);
+    c.fillStyle = SHL;
+    px(c, lx + 1, legY + 7); px(c, lx + 2, legY + 7);
+
+    const rx = cx + 1 + (pose.legR || 0);
+    for (let ly = 0; ly < 7; ly++) {
+      c.fillStyle = ly % 3 === 0 ? JS : JN;
+      px(c, rx, legY + ly); px(c, rx + 1, legY + ly); px(c, rx + 2, legY + ly);
+    }
+    c.fillStyle = SHO;
+    px(c, rx - 1, legY + 7); px(c, rx, legY + 7);
+    c.fillStyle = SHL;
+    px(c, rx + 1, legY + 7); px(c, rx + 2, legY + 7);
+  }
+
+  // 4-frame idle
+  const dezC = makeCanvas(fw * 4, fh);
+  const dezX = dezC.getContext('2d');
+  const dezPoses = [
+    { hairBounce: 0, armL: 0, armR: 0, legL: 0, legR: 0 },
+    { hairBounce: 0, armL: 0, armR: 0, legL: 0, legR: 0 },
+    { hairBounce: -1, armL: 0, armR: 0, legL: 0, legR: 0 },
+    { hairBounce: 0, armL: 0, armR: 0, legL: 0, legR: 0 },
+  ];
+  for (let i = 0; i < 4; i++) drawDezFrame(dezX, i * fw, dezPoses[i]);
+  img.dezIdle = dezC;
+}
+
+// ============================================================
+//  GAME STATE
+// ============================================================
+let state = 'loading', distance = 0, score = 0, lives = 3, livesMax = 3;
+let lettersCollected = 0, hitCooldown = 0, screenShake = 0, gameTime = 0;
+let surpriseTimer = 0, surprisePhase = 0;
+let currentNote = null;  // Story item note being displayed
+let storyItems = [];     // Runtime story item instances
+let hasPurse = false;    // Player carrying the Celine bag
+const held = { left: false, right: false, jump: false };
+let jumpBufferTimer = 0, touchJoystick = null, touchJumpId = null;
+let camX = 0;
+const CAM_L = 70, CAM_R = 130;
+
+// Boulder interaction state
+const BOULDER_X = 2100;
+const BOULDER_W = 60, BOULDER_H = 45;
+let boulderOffsetX = 0;
+let boulderPhase = 0; // 0=idle,1=solo,2=tooHeavy,3=dezEnter,4=together,5=clearing,6=done
+let boulderTaps = 0;
+let boulderTimer = 0;
+let boulderShake = 0;
+let dezBoulderX = 0; // Dez x during boulder scene
+let boulderNoteActive = false;
+let hugTimer = 0;
+let hugPhase = 0;
+
+const player = {
+  x: 60, y: FOOT_Y - PH, vx: 0, vy: 0, w: PW, h: PH,
+  onGround: true, coyoteTimer: 0, facing: 1, frame: 0, animTimer: 0, jumping: false,
+};
+const yorkies = [
+  { x: 35, y: 0, vx: 0, frame: 0, timer: 0, bounce: 0 },
+  { x: 20, y: 0, vx: 0, frame: 0, timer: 0, bounce: 0 },
+];
+let platforms = [], collectibles = [], obstacles = [], particles = [], floatingTexts = [];
+let ambientMotes = [];
+let decorations = []; // bushes, plants placed in world
+
+// ============================================================
+//  WORLD GENERATION
+// ============================================================
+function generateWorld(fromX, toX) {
+  const sp = 70;
+  for (let slot = Math.floor(fromX / sp); slot <= Math.ceil(toX / sp); slot++) {
+    const bx = slot * sp + (slot * 13579) % 23;
+    if (bx < 120 || Math.abs(bx - DEZ_X) < 60 || Math.abs(bx - BOULDER_X) < 60 || obstacles.some(o => Math.abs(o.x - bx) < 35)) continue;
+    const r = ((slot * 7919) % 100) / 100;
+
+    // Fewer obstacles near the end (clearing)
+    var localProg = Math.min(1, bx / (LEVEL_DIST * 3));
+    var obstThresh = 0.25 * (1 - localProg * 0.8); // thins out
+
+    // Obstacles
+    if (r < obstThresh) {
+      const types = ['rock', 'mushroom'];
+      const type = types[Math.floor(((slot * 3571) % 100) / 50)];
+      let ow, oh;
+      if (type === 'rock') { ow = 28; oh = 15; }
+      else { ow = 20; oh = 22; }
+      obstacles.push({ type, x: bx, y: FOOT_Y, w: ow, h: oh });
+    }
+
+    // Platforms (no random collectibles)
+    if (r > 0.6 && r < 0.75 && localProg < 0.85) {
+      const pw = 32, py = FOOT_Y - 32 - (slot * 31 % 18);
+      platforms.push({ x: bx, y: py, w: pw });
+    }
+
+    // Decorations (bushes, plants)
+    if (r > 0.3 && r < 0.45) {
+      const dtype = Math.random() < 0.5 ? 'bush' : 'plant';
+      if (!decorations.some(d => Math.abs(d.x - bx) < 40)) {
+        decorations.push({ type: dtype, x: bx + (slot * 17 % 30), y: FOOT_Y });
+      }
+    }
+  }
+}
+
+// ============================================================
+//  INPUT
+// ============================================================
+function onKD(e) {
+  if (state === 'title') { if (e.code === 'Space' || e.code === 'Enter') startGame(); return; }
+  if (state === 'surprise') { if (e.code === 'Space' || e.code === 'Enter') advSurprise(); return; }
+  if (state === 'note') { if (e.code === 'Space' || e.code === 'Enter') dismissNote(); return; }
+  if (state === 'boulder') { if (e.code === 'Space') boulderPush(); return; }
+  if (state === 'hug') { if (e.code === 'Space' || e.code === 'Enter') advHug(); return; }
+  if (state !== 'playing') return;
+  switch (e.code) {
+    case 'ArrowLeft': case 'KeyA': held.left = true; break;
+    case 'ArrowRight': case 'KeyD': held.right = true; break;
+    case 'ArrowUp': case 'KeyW': case 'Space': held.jump = true; jumpBufferTimer = JUMP_BUFFER_MS; break;
+  }
+}
+function onKU(e) {
+  switch (e.code) {
+    case 'ArrowLeft': case 'KeyA': held.left = false; break;
+    case 'ArrowRight': case 'KeyD': held.right = false; break;
+    case 'ArrowUp': case 'KeyW': case 'Space': held.jump = false; break;
+  }
+}
+function onClick() {
+  if (state === 'title') startGame();
+  else if (state === 'surprise') advSurprise();
+  else if (state === 'note') dismissNote();
+  else if (state === 'boulder') boulderPush();
+  else if (state === 'hug') advHug();
+  else if (state === 'credits') state = 'title';
+}
+function onTS(e) {
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const sx = W / rect.width;
+  for (const t of e.changedTouches) {
+    const tx = (t.clientX - rect.left) * sx;
+    if (state === 'title') { startGame(); return; }
+    if (state === 'surprise') { advSurprise(); return; }
+    if (state === 'note') { dismissNote(); return; }
+    if (state === 'boulder') { boulderPush(); return; }
+    if (state === 'hug') { advHug(); return; }
+    if (state === 'credits') { state = 'title'; return; }
+    if (state !== 'playing') return;
+    if (tx < W / 2) touchJoystick = { id: t.identifier, sx: tx, cx: tx };
+    else { touchJumpId = t.identifier; held.jump = true; jumpBufferTimer = JUMP_BUFFER_MS; }
+  }
+}
+function onTM(e) {
+  e.preventDefault();
+  if (!touchJoystick) return;
+  const rect = canvas.getBoundingClientRect(), sx = W / rect.width;
+  for (const t of e.changedTouches) {
+    if (t.identifier === touchJoystick.id) {
+      touchJoystick.cx = (t.clientX - rect.left) * sx;
+      const dx = touchJoystick.cx - touchJoystick.sx;
+      held.left = dx < -8; held.right = dx > 8;
+    }
+  }
+}
+function onTE(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (touchJoystick && t.identifier === touchJoystick.id) { touchJoystick = null; held.left = false; held.right = false; }
+    if (t.identifier === touchJumpId) { touchJumpId = null; held.jump = false; }
+  }
+}
+
+// ============================================================
+//  AUDIO (procedural)
+// ============================================================
+let audioCtx = null;
+function getAC() { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); return audioCtx; }
+
+// Background music
+let bgMusic = null;
+let bgMusicStarted = false;
+function startBgMusic() {
+  if (bgMusicStarted) return;
+  bgMusicStarted = true;
+  bgMusic = new Audio('assets/music.wav');
+  bgMusic.loop = true;
+  bgMusic.volume = 0.15;
+  bgMusic.play().catch(function() {});
+}
+function snd(type) {
+  try {
+    const ac = getAC(), now = ac.currentTime, g = ac.createGain(); g.connect(ac.destination);
+    if (type === 'jump') { const o = ac.createOscillator(); o.type = 'sine'; o.frequency.setValueAtTime(420, now); o.frequency.linearRampToValueAtTime(720, now + 0.1); g.gain.setValueAtTime(0.1, now); g.gain.linearRampToValueAtTime(0, now + 0.12); o.connect(g); o.start(now); o.stop(now + 0.12); }
+    else if (type === 'collect') { const o = ac.createOscillator(); o.type = 'sine'; o.frequency.setValueAtTime(523, now); o.frequency.setValueAtTime(659, now + 0.06); o.frequency.setValueAtTime(784, now + 0.12); g.gain.setValueAtTime(0.1, now); g.gain.linearRampToValueAtTime(0, now + 0.2); o.connect(g); o.start(now); o.stop(now + 0.2); }
+    else if (type === 'letter') { for (let i = 0; i < 4; i++) { const o = ac.createOscillator(), g2 = ac.createGain(); o.type = 'sine'; o.frequency.setValueAtTime(700 + i * 250, now + i * 0.07); g2.gain.setValueAtTime(0.07, now + i * 0.07); g2.gain.linearRampToValueAtTime(0, now + i * 0.07 + 0.2); o.connect(g2); g2.connect(ac.destination); o.start(now + i * 0.07); o.stop(now + i * 0.07 + 0.2); } }
+    else if (type === 'hit') { const o = ac.createOscillator(); o.type = 'square'; o.frequency.setValueAtTime(200, now); o.frequency.linearRampToValueAtTime(80, now + 0.15); g.gain.setValueAtTime(0.08, now); g.gain.linearRampToValueAtTime(0, now + 0.15); o.connect(g); o.start(now); o.stop(now + 0.15); }
+    else if (type === 'surprise') { [523, 659, 784, 1047, 1319].forEach((f, i) => { const o = ac.createOscillator(), g2 = ac.createGain(); o.type = 'sine'; o.frequency.setValueAtTime(f, now + i * 0.12); g2.gain.setValueAtTime(0.07, now + i * 0.12); g2.gain.linearRampToValueAtTime(0, now + i * 0.12 + 0.4); o.connect(g2); g2.connect(ac.destination); o.start(now + i * 0.12); o.stop(now + i * 0.12 + 0.4); }); }
+  } catch (e) {}
+}
+
+// ============================================================
+//  GAME START
+// ============================================================
+function startGame() {
+  startBgMusic();
+  state = 'playing'; distance = 0; score = 0; lives = 3; lettersCollected = 0;
+  hitCooldown = 0; gameTime = 0;
+  player.x = 60; player.y = FOOT_Y - PH; player.vx = 0; player.vy = 0;
+  player.onGround = true; player.facing = 1; player.frame = 0; player.animTimer = 0; camX = 0;
+  yorkies[0].x = 35; yorkies[1].x = 20;
+  platforms = []; collectibles = []; obstacles = []; particles = []; floatingTexts = []; decorations = [];
+  currentNote = null;
+  hasPurse = false;
+  boulderOffsetX = 0; boulderPhase = 0; boulderTaps = 0;
+  boulderTimer = 0; boulderShake = 0; dezBoulderX = 0;
+  boulderNoteActive = false; hugTimer = 0; hugPhase = 0;
+  // Initialize story items at fixed world positions
+  storyItems = STORY_ITEMS.map(function(si) {
+    var itemY = si.yOverride || (FOOT_Y - 16);
+    return { type: si.type, x: si.x, y: itemY, title: si.title, note: si.note, collected: false, bobTimer: 0 };
+  });
+  // Place fixed platforms for story items that need them
+  for (var i = 0; i < STORY_ITEMS.length; i++) {
+    if (STORY_ITEMS[i].platforms) {
+      for (var j = 0; j < STORY_ITEMS[i].platforms.length; j++) {
+        var sp = STORY_ITEMS[i].platforms[j];
+        platforms.push({ x: sp.x, y: sp.y, w: sp.w });
+      }
+    }
+  }
+  generateWorld(0, W * 3);
+}
+
+// ============================================================
+//  UPDATE
+// ============================================================
+function update(dt) {
+  if (state !== 'playing') return;
+  gameTime += dt;
+
+  // Player movement
+  if (held.right) { player.vx += ACCEL * dt; if (player.vx > MAX_RUN) player.vx = MAX_RUN; player.facing = 1; }
+  else if (held.left) { player.vx -= ACCEL * dt; if (player.vx < -MAX_RUN) player.vx = -MAX_RUN; player.facing = -1; }
+  else { if (player.vx > 0) { player.vx -= DECEL * dt; if (player.vx < 0) player.vx = 0; } else if (player.vx < 0) { player.vx += DECEL * dt; if (player.vx > 0) player.vx = 0; } }
+
+  // Auto-run gentle push
+  if (player.vx < 30 && !held.left) player.vx += 80 * dt;
+
+  // Coyote time + jump buffer
+  if (player.onGround) player.coyoteTimer = COYOTE_MS; else player.coyoteTimer -= dt * 1000;
+  if (jumpBufferTimer > 0) {
+    jumpBufferTimer -= dt * 1000;
+    if (player.coyoteTimer > 0 && player.onGround) {
+      player.vy = JUMP_VEL; player.onGround = false; player.jumping = true;
+      player.coyoteTimer = 0; jumpBufferTimer = 0;
+      snd('jump');
+      for (let i = 0; i < 5; i++) particles.push(mkP(player.x, FOOT_Y, [138, 122, 90], 0.3));
+    }
+  }
+
+  // Gravity
+  if (!player.onGround) player.vy += GRAVITY * dt;
+  player.x += player.vx * dt; player.y += player.vy * dt;
+
+  // Ground collision
+  const ft = player.y + player.h;
+  if (ft >= FOOT_Y) {
+    if (!player.onGround) for (let i = 0; i < 3; i++) particles.push(mkP(player.x, FOOT_Y, [138, 122, 90], 0.2));
+    player.y = FOOT_Y - player.h; player.vy = 0; player.onGround = true; player.jumping = false;
+  }
+  player.onGround = ft >= FOOT_Y;
+
+  // Platform collision
+  for (const p of platforms) {
+    const pf = player.y + player.h;
+    if (player.vy >= 0 && player.x + player.w / 2 > p.x && player.x - player.w / 2 < p.x + p.w && pf >= p.y && pf <= p.y + 8) {
+      player.y = p.y - player.h; player.vy = 0; player.onGround = true; player.jumping = false;
+    }
+  }
+
+  // Distance & camera
+  distance = Math.max(distance, Math.floor(player.x / 3));
+  if (player.x - camX > CAM_R) camX = player.x - CAM_R;
+  if (player.x - camX < CAM_L) camX = player.x - CAM_L;
+  if (camX < 0) camX = 0;
+
+  generateWorld(camX + W, camX + W * 2);
+
+  // Yorkies follow
+  yorkies.forEach((y, i) => {
+    const tx = player.x - 22 - i * 18;
+    y.vx = (tx - y.x) * 3;
+    y.x += y.vx * dt;
+    y.y = FOOT_Y;
+    if (Math.abs(y.vx) > 10) { y.timer += dt * Math.abs(y.vx) * 0.09; y.frame = Math.floor(y.timer) % 6; }
+    else y.frame = 0;
+    y.bounce = Math.abs(y.vx) > 15 ? Math.sin(y.timer * 3) * 2 : 0;
+  });
+
+  // Player animation
+  if (!player.onGround) {
+    player.frame = 0; // jump frame
+  } else if (Math.abs(player.vx) > 10) {
+    player.animTimer += dt * Math.abs(player.vx) * 0.06;
+    player.frame = Math.floor(player.animTimer) % PLAYER_RUN_FRAMES;
+  } else {
+    player.animTimer += dt * 4;
+    player.frame = Math.floor(player.animTimer) % PLAYER_IDLE_FRAMES;
+  }
+
+  // Story item collision
+  const px1 = player.x - player.w / 2 + HIT_SHRINK, py1 = player.y + HIT_SHRINK;
+  const px2 = player.x + player.w / 2 - HIT_SHRINK, py2 = player.y + player.h - HIT_SHRINK;
+  for (const si of storyItems) {
+    if (si.collected) continue;
+    si.bobTimer += dt * 3;
+    const sx = si.x, sy = si.y + Math.sin(si.bobTimer) * 3, cr = 10;
+    if (px1 < sx + cr && px2 > sx - cr && py1 < sy + cr && py2 > sy - cr) {
+      si.collected = true;
+      lettersCollected++;
+      score += 50;
+      snd('letter');
+      burst(sx, sy, [255, 215, 0], 12);
+      if (si.type === 'celine') hasPurse = true;
+      // Open Pokemon-style note popup
+      currentNote = si;
+      noteTimer = 0;
+      state = 'note';
+    }
+  }
+
+  // Obstacle collision
+  if (hitCooldown > 0) hitCooldown -= dt;
+  else {
+    for (const o of obstacles) {
+      const ox1 = o.x - o.w / 2, oy1 = o.y - o.h, ox2 = o.x + o.w / 2, oy2 = o.y;
+      if (px1 < ox2 && px2 > ox1 && py2 > oy1 && py1 < oy2) {
+        lives--; hitCooldown = 1.5; screenShake = 0.2; snd('hit');
+        burst(player.x, player.y + player.h / 2, [255, 68, 68], 6);
+        player.vx = -60; player.vy = -100; player.onGround = false;
+        if (lives <= 0) { lives = 3; floatingTexts.push({ x: player.x, y: player.y, text: 'Keep going!', timer: 1.5, color: '#FFF' }); }
+        break;
+      }
+    }
+  }
+
+  // Boulder collision — blocks player from passing through
+  var bWorldX = BOULDER_X + boulderOffsetX;
+  if (boulderPhase === 0 && player.x + player.w / 2 > bWorldX - 18) {
+    player.x = bWorldX - 18 - player.w / 2;
+    if (player.vx > 0) player.vx = 0;
+    // Trigger boulder scene
+    state = 'boulder';
+    boulderPhase = 1;
+    boulderTaps = 0;
+    boulderTimer = 0;
+    // Stop player at boulder, face right (toward boulder)
+    player.vx = 0;
+    player.facing = 1;
+    held.left = false; held.right = false; held.jump = false;
+  }
+
+  // Particles & floating text
+  for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 90 * dt; p.life -= dt; }
+  particles = particles.filter(p => p.life > 0);
+  for (const f of floatingTexts) { f.timer -= dt; f.y -= 22 * dt; }
+  floatingTexts = floatingTexts.filter(f => f.timer > 0);
+  if (screenShake > 0) screenShake -= dt;
+
+  // Ambient motes
+  for (const m of ambientMotes) {
+    m.ph += dt * 0.8; m.x += m.vx * dt + Math.sin(m.ph) * 0.3; m.y += m.vy * dt + Math.cos(m.ph * 0.7) * 0.2;
+    if (m.x < -10) m.x = W + 10; if (m.x > W + 10) m.x = -10;
+    if (m.y < 10) m.y = FOOT_Y - 20; if (m.y > FOOT_Y) m.y = 20;
+  }
+
+  // Cleanup offscreen
+  const cl = camX - W;
+  obstacles = obstacles.filter(o => o.x > cl);
+  platforms = platforms.filter(p => p.x + p.w > cl);
+  decorations = decorations.filter(d => d.x > cl);
+}
+
+function mkP(x, y, c, l) { return { x, y, c, life: l, ml: l, vx: (Math.random() - 0.5) * 50, vy: -(Math.random() * 40 + 15) }; }
+function burst(x, y, c, n) { for (let i = 0; i < n; i++) particles.push({ x, y, c, life: 0.3 + Math.random() * 0.3, ml: 0.6, vx: (Math.random() - 0.5) * 70, vy: -(Math.random() * 60 + 20) }); }
+function advSurprise() { surprisePhase++; surpriseTimer = 0; if (surprisePhase >= 4) state = 'credits'; if (surprisePhase === 1 || surprisePhase === 2) snd('surprise'); }
+function dismissNote() {
+  if (boulderNoteActive) {
+    boulderNoteActive = false; currentNote = null;
+    state = 'hug'; hugTimer = 0; hugPhase = 0;
+    return;
+  }
+  currentNote = null; state = 'playing';
+}
+function boulderPush() {
+  if (boulderPhase === 1) {
+    // Solo pushing — barely moves
+    boulderTaps++;
+    boulderOffsetX += 2;
+    player.x += 2; // move with boulder
+    boulderShake = 0.15;
+    snd('hit');
+    burst(BOULDER_X + boulderOffsetX - 10, FOOT_Y - 15, [140, 140, 140], 4);
+    // Quick push animation
+    player.frame = (player.frame + 1) % PLAYER_RUN_FRAMES;
+    if (boulderTaps >= 10) {
+      boulderPhase = 2; // too heavy
+      boulderTimer = 0;
+    }
+  } else if (boulderPhase === 4) {
+    // Together pushing — moves much more
+    boulderTaps++;
+    boulderOffsetX += 12;
+    player.x += 12; // move with boulder
+    boulderShake = 0.1;
+    snd('collect');
+    burst(BOULDER_X + boulderOffsetX - 10, FOOT_Y - 15, [140, 140, 140], 6);
+    player.frame = (player.frame + 1) % PLAYER_RUN_FRAMES;
+    if (boulderOffsetX > 200) {
+      boulderPhase = 5; // clearing
+      boulderTimer = 0;
+    }
+  }
+}
+function advHug() {
+  if (hugPhase >= 2) {
+    state = 'surprise'; surprisePhase = 0; surpriseTimer = 0; snd('surprise');
+  }
+}
+
+// ============================================================
+//  DRAW HELPERS
+// ============================================================
+function drawSprite(sheet, frameW, frameH, frameIdx, x, y, flipX, scale) {
+  if (!sheet) return;
+  scale = scale || 1;
+  const sx = frameIdx * frameW, sy = 0;
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  if (flipX) {
+    ctx.translate(x + frameW * scale, y);
+    ctx.scale(-scale, scale);
+    ctx.drawImage(sheet, sx, sy, frameW, frameH, 0, 0, frameW, frameH);
+  } else {
+    ctx.drawImage(sheet, sx, sy, frameW, frameH, x, y, frameW * scale, frameH * scale);
+  }
+  ctx.restore();
+}
+
+function drawSpriteRow(sheet, frameW, frameH, col, row, x, y, flipX, scale) {
+  if (!sheet) return;
+  scale = scale || 1;
+  const sx = col * frameW, sy = row * frameH;
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  if (flipX) {
+    ctx.translate(x + frameW * scale, y);
+    ctx.scale(-scale, scale);
+    ctx.drawImage(sheet, sx, sy, frameW, frameH, 0, 0, frameW, frameH);
+  } else {
+    ctx.drawImage(sheet, sx, sy, frameW, frameH, x, y, frameW * scale, frameH * scale);
+  }
+  ctx.restore();
+}
+
+// Tile a background image horizontally with parallax
+function tileBg(image, parallax, yOffset, hScale) {
+  if (!image) return;
+  ctx.imageSmoothingEnabled = false;
+  const iw = image.width, ih = image.height;
+  const dh = hScale || H;
+  const dw = Math.ceil(iw * (dh / ih));
+  const scrollX = (camX * parallax) % dw;
+  for (let x = -scrollX - dw; x < W + dw; x += dw) {
+    ctx.drawImage(image, x, yOffset || 0, dw, dh);
+  }
+}
+
+// ============================================================
+//  COLOR UTILS
+// ============================================================
+function lerpColor(a, b, t) {
+  const ar = (a >> 16) & 0xFF, ag = (a >> 8) & 0xFF, ab = a & 0xFF;
+  const br = (b >> 16) & 0xFF, bg = (b >> 8) & 0xFF, bb = b & 0xFF;
+  const r = Math.round(ar + (br - ar) * t);
+  const g = Math.round(ag + (bg - ag) * t);
+  const bl = Math.round(ab + (bb - ab) * t);
+  return '#' + ((1 << 24) + (r << 16) + (g << 8) + bl).toString(16).slice(1);
+}
+
+// ============================================================
+//  DRAW GAME
+// ============================================================
+function drawGame() {
+  // Level progress 0→1 for visual arc
+  const prog = Math.min(1, distance / LEVEL_DIST);
+  // Biome blend: 0 = original forest, 1 = oak woods
+  // Transition happens between 35%-65% progress
+  const biomeT = Math.max(0, Math.min(1, (prog - 0.35) / 0.3));
+  const origA = 1 - biomeT;  // original forest opacity
+  const oakA = biomeT;        // oak woods opacity
+
+  // === ORIGINAL FOREST (fades out) ===
+  if (origA > 0) {
+    // Sky gradient
+    const skyG = ctx.createLinearGradient(0, 0, 0, H);
+    skyG.addColorStop(0, '#1A3A20');
+    skyG.addColorStop(0.4, '#2A4A28');
+    skyG.addColorStop(0.7, '#1E3818');
+    skyG.addColorStop(1, '#0E200C');
+    ctx.fillStyle = skyG;
+    ctx.fillRect(0, 0, W, H);
+    // Background layers
+    ctx.globalAlpha = origA;
+    tileBg(img.bgBack, 0.05, 0);
+    tileBg(img.bgMid, 0.2, 0);
+    // Light rays
+    ctx.globalAlpha = origA * (0.3 + Math.sin(gameTime * 0.5) * 0.1);
+    tileBg(img.bgLights, 0.12, 0);
+    // Foreground trees
+    ctx.globalAlpha = origA;
+    tileBg(img.bgFront, 0.45, 0);
+    ctx.globalAlpha = 1;
+  }
+
+  // === OAK WOODS BIOME (fades in) ===
+  if (oakA > 0) {
+    if (origA <= 0) {
+      ctx.fillStyle = '#8898B8';
+      ctx.fillRect(0, 0, W, H);
+    }
+    ctx.globalAlpha = oakA;
+    tileBg(img.oakBack, 0.05, 0);
+    tileBg(img.oakMid, 0.2, 0);
+    tileBg(img.oakFront, 0.4, 0);
+    ctx.globalAlpha = 1;
+  }
+
+  // === GAME WORLD (camera-relative) ===
+  ctx.save();
+  ctx.translate(-camX, 0);
+
+  // Ground
+  drawGround();
+
+  // Decorations (behind characters)
+  for (const d of decorations) {
+    const di = d.type === 'bush' ? img.bush : img.plant;
+    if (di) {
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(di, Math.floor(d.x - di.width / 2), Math.floor(d.y - di.height));
+    }
+  }
+
+  // Platforms
+  for (const p of platforms) {
+    if (img.platform) {
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(img.platform, p.x, p.y, p.w, 8);
+      // Moss on top
+      if (img.moss) {
+        ctx.globalAlpha = 0.7;
+        ctx.drawImage(img.moss, p.x + 2, p.y - 4, p.w - 4, 6);
+        ctx.globalAlpha = 1;
+      }
+    } else {
+      ctx.fillStyle = '#5A5040';
+      ctx.fillRect(p.x, p.y, p.w, 6);
+    }
+  }
+
+  // Obstacles
+  for (const o of obstacles) {
+    ctx.imageSmoothingEnabled = false;
+    if (o.type === 'rock' && img.rock) {
+      ctx.drawImage(img.rock, Math.floor(o.x - img.rock.width / 2), Math.floor(o.y - img.rock.height));
+    } else if (o.type === 'mushroom' && img.mushroom) {
+      const mScale = 0.7;
+      const mw = img.mushroom.width * mScale, mh = img.mushroom.height * mScale;
+      ctx.drawImage(img.mushroom, Math.floor(o.x - mw / 2), Math.floor(o.y - mh), mw, mh);
+    }
+  }
+
+  // Story items
+  for (const si of storyItems) {
+    if (si.collected) continue;
+    const bob = Math.sin(si.bobTimer) * 3;
+    const sx = Math.floor(si.x), sy = Math.floor(si.y + bob);
+
+    // Glow
+    ctx.globalAlpha = 0.25 + Math.sin(gameTime * 2) * 0.1;
+    ctx.fillStyle = '#FFD700';
+    ctx.beginPath(); ctx.arc(sx, sy, 12, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // Draw sprite based on type
+    if (si.type === 'bolognese') {
+      ctx.drawImage(sprBolognese, sx - 8, sy - 7);
+    } else if (si.type === 'celine') {
+      ctx.drawImage(sprCeline, sx - 7, sy - 6);
+    } else if (si.type === 'balance') {
+      ctx.drawImage(sprBalance, sx - 11, sy - 9);
+    }
+  }
+
+  // Boulder (always visible in world once player is near)
+  if (boulderPhase < 5 || (boulderPhase === 5 && boulderOffsetX < 400)) {
+    var bDrawX = BOULDER_X + boulderOffsetX;
+    var bShakeOff = boulderShake > 0 ? (Math.random() - 0.5) * 4 : 0;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(sprBoulder, Math.floor(bDrawX - BOULDER_W / 2 + bShakeOff), Math.floor(FOOT_Y - BOULDER_H));
+  }
+
+  // Yorkies
+  yorkies.forEach((y, i) => {
+    if (!img.dog) return;
+    const row = Math.abs(y.vx) > 15 ? 2 : 0;
+    const col = y.frame % DOG_COLS;
+    const boff = Math.floor(y.bounce);
+    const flip = y.vx < -5;
+    if (i === 0) {
+      // First yorkie - normal proportions
+      const dx = Math.floor(y.x - DOG_FRAME.w / 2);
+      const dy = Math.floor(y.y - DOG_FRAME.h + boff);
+      drawSpriteRow(img.dog, DOG_FRAME.w, DOG_FRAME.h, col, row, dx, dy, flip, 1);
+    } else {
+      // Second yorkie - longer and skinnier
+      const dw = Math.floor(DOG_FRAME.w * 1.25);
+      const dh = Math.floor(DOG_FRAME.h * 0.82);
+      const sx = col * DOG_FRAME.w, sy = row * DOG_FRAME.h;
+      const dx = Math.floor(y.x - dw / 2);
+      const dy = Math.floor(y.y - dh + boff);
+      ctx.save();
+      ctx.imageSmoothingEnabled = false;
+      if (flip) {
+        ctx.translate(dx + dw, dy);
+        ctx.scale(-1, 1);
+        ctx.drawImage(img.dog, sx, sy, DOG_FRAME.w, DOG_FRAME.h, 0, 0, dw, dh);
+      } else {
+        ctx.drawImage(img.dog, sx, sy, DOG_FRAME.w, DOG_FRAME.h, dx, dy, dw, dh);
+      }
+      ctx.restore();
+    }
+  });
+
+  // Dez — visible during boulder phases 3-6 (entering/together/walk)
+  if (img.dezIdle && boulderPhase >= 3 && boulderPhase <= 6) {
+    var dezFi = Math.floor(gameTime * 3) % 4;
+    var dezPx = Math.floor(dezBoulderX - DEZ_FRAME.w * DEZ_SCALE / 2);
+    var dezPy = Math.floor(FOOT_Y - DEZ_FRAME.h * DEZ_SCALE);
+    // Rope from Dez to boulder (only during push phases)
+    if (boulderPhase >= 3 && boulderPhase <= 5) {
+      var ropeStartX = dezBoulderX - 8;
+      var ropeEndX = BOULDER_X + boulderOffsetX + BOULDER_W / 2 - 2;
+      ctx.strokeStyle = '#8B6914';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(ropeStartX, FOOT_Y - 16);
+      ctx.quadraticCurveTo((ropeStartX + ropeEndX) / 2, FOOT_Y - 6, ropeEndX, FOOT_Y - 14);
+      ctx.stroke();
+      ctx.lineWidth = 1;
+    }
+    drawSprite(img.dezIdle, DEZ_FRAME.w, DEZ_FRAME.h, dezFi, dezPx, dezPy, true, DEZ_SCALE);
+  }
+
+  // Player
+  const blink = hitCooldown > 0 && Math.floor(hitCooldown * 10) % 2 === 0;
+  if (!blink) {
+    const flip = player.facing < 0;
+    let sheet, frameW = PLAYER_FRAME.w, frameH = PLAYER_FRAME.h, fi = player.frame;
+    if (hitCooldown > 0 && img.playerHurt) {
+      sheet = img.playerHurt; fi = fi % PLAYER_HURT_FRAMES;
+    } else if (!player.onGround && img.playerJump) {
+      sheet = img.playerJump; fi = player.vy < 0 ? 0 : 1;
+    } else if (Math.abs(player.vx) > 10 && img.playerRun) {
+      sheet = img.playerRun; fi = fi % PLAYER_RUN_FRAMES;
+    } else if (img.playerIdle) {
+      sheet = img.playerIdle; fi = fi % PLAYER_IDLE_FRAMES;
+    }
+    if (sheet) {
+      const px = Math.floor(player.x - frameW / 2);
+      const py = Math.floor(player.y + player.h - frameH); // align feet to bottom
+      drawSprite(sheet, frameW, frameH, fi, px, py, flip, 1);
+      // Draw Celine purse on the character's arm
+      if (hasPurse) {
+        ctx.imageSmoothingEnabled = false;
+        const purseX = flip ? px + 4 : px + frameW - 16;
+        const purseY = py + 14 + Math.sin(gameTime * 4) * 0.5;
+        ctx.drawImage(sprCeline, Math.floor(purseX), Math.floor(purseY));
+      }
+    }
+  }
+
+  // Particles
+  for (const p of particles) {
+    ctx.globalAlpha = p.life / p.ml;
+    ctx.fillStyle = `rgb(${p.c[0]},${p.c[1]},${p.c[2]})`;
+    ctx.fillRect(Math.floor(p.x) - 1, Math.floor(p.y) - 1, 2, 2);
+  }
+  ctx.globalAlpha = 1;
+
+  // Floating texts
+  for (const f of floatingTexts) {
+    ctx.globalAlpha = Math.min(1, f.timer);
+    ctx.fillStyle = f.color;
+    ctx.font = 'bold 7px monospace'; ctx.textAlign = 'center';
+    ctx.shadowColor = '#000'; ctx.shadowBlur = 2;
+    ctx.fillText(f.text, f.x, f.y);
+    ctx.shadowBlur = 0;
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+
+  // Ambient motes — dim in dark forest, bright sparkles in oak woods
+  for (const m of ambientMotes) {
+    const pulse = 0.5 + Math.sin(m.ph) * 0.5;
+    const a = m.a * pulse * (0.4 + prog * 1.2);
+    ctx.globalAlpha = Math.min(1, a);
+    ctx.fillStyle = prog < 0.5 ? '#8898A8' : lerpColor(0xD8CC78, 0xFFDD88, prog);
+    const sz = m.s > 1.5 ? 2 : 1;
+    ctx.fillRect(Math.floor(m.x), Math.floor(m.y), sz, sz);
+  }
+  ctx.globalAlpha = 1;
+
+  // Butterflies — appear in oak woods section (prog > 0.4)
+  if (prog > 0.4) {
+    var bAlpha = Math.min(1, (prog - 0.4) / 0.2);
+    var bColors = ['#FF88B0', '#FFB060', '#B088FF', '#88D0FF', '#FFDD60'];
+    for (var bi = 0; bi < 8; bi++) {
+      var bx = ((bi * 41 + 17) % W + Math.sin(gameTime * 0.6 + bi * 1.7) * 25 + gameTime * 4) % (W + 20) - 10;
+      var by = 30 + bi * 14 + Math.sin(gameTime * 1.2 + bi * 2.1) * 18;
+      var wingPhase = Math.sin(gameTime * 8 + bi * 3);
+      ctx.globalAlpha = bAlpha * (0.5 + Math.sin(gameTime * 0.5 + bi) * 0.2);
+      ctx.fillStyle = bColors[bi % 5];
+      // Wings (flapping)
+      var wingW = 2 + Math.abs(wingPhase);
+      ctx.fillRect(Math.floor(bx - wingW), Math.floor(by), Math.ceil(wingW), 2);
+      ctx.fillRect(Math.floor(bx + 1), Math.floor(by), Math.ceil(wingW), 2);
+      // Body
+      ctx.fillStyle = '#402020';
+      ctx.fillRect(Math.floor(bx), Math.floor(by), 1, 3);
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawGround() {
+  const prog = Math.min(1, distance / LEVEL_DIST);
+  const startX = Math.floor(camX / 16) * 16;
+  for (let x = startX; x < camX + W + 16; x += 16) {
+    // Dirt — dark mossy → warm earthy
+    ctx.fillStyle = lerpColor(0x1E1810, 0x4A3020, prog);
+    ctx.fillRect(x, FOOT_Y, 16, H - FOOT_Y);
+    ctx.fillStyle = lerpColor(0x282018, 0x5A4828, prog);
+    ctx.fillRect(x, FOOT_Y + 2, 16, 4);
+    ctx.fillStyle = lerpColor(0x141008, 0x3A2818, prog);
+    ctx.fillRect(x, FOOT_Y + 8, 16, H - FOOT_Y - 8);
+    // Grass top — dark muted forest green → warm lush green
+    ctx.fillStyle = lerpColor(0x2A5A20, 0x60A838, prog);
+    ctx.fillRect(x, FOOT_Y - 3, 16, 5);
+    ctx.fillStyle = lerpColor(0x387830, 0x78C050, prog);
+    ctx.fillRect(x, FOOT_Y - 3, 16, 2);
+    ctx.fillStyle = lerpColor(0x489840, 0x90D868, prog);
+    ctx.fillRect(x + ((x * 7) & 3), FOOT_Y - 4, 3, 2);
+    const seed = (x * 7919) & 0xFF;
+    if (seed % 4 === 0) {
+      ctx.fillStyle = lerpColor(0x5AB840, 0x78D058, prog);
+      ctx.fillRect(x + seed % 12, FOOT_Y - 5, 1, 3);
+    }
+    if (seed % 7 === 0) {
+      ctx.fillStyle = lerpColor(0x78D058, 0x98E070, prog);
+      ctx.fillRect(x + (seed * 3) % 14, FOOT_Y - 6, 1, 4);
+    }
+    // Flowers — more frequent and warmer as progress increases
+    const flowerChance = prog > 0.4 ? 10 : 20;
+    if (seed % flowerChance === 0) {
+      const fc = prog > 0.6
+        ? ['#FFB060', '#FFD070', '#FFAA80', '#FF9060'][seed % 4]
+        : ['#FF6080', '#FFDD44', '#FFB0D0', '#B060E0'][seed % 4];
+      ctx.fillStyle = fc;
+      ctx.fillRect(x + seed % 13, FOOT_Y - 6, 2, 2);
+    }
+  }
+}
+
+// ============================================================
+//  HUD
+// ============================================================
+function drawHUD() {
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.fillRect(0, 0, W, 22);
+
+  // Hearts
+  for (let i = 0; i < livesMax; i++) {
+    ctx.globalAlpha = i < lives ? 1 : 0.2;
+    ctx.drawImage(sprHeart, 8 + i * 14, 5);
+  }
+  ctx.globalAlpha = 1;
+
+  // Score
+  ctx.fillStyle = '#FFF'; ctx.font = 'bold 8px monospace'; ctx.textAlign = 'right';
+  ctx.shadowColor = '#000'; ctx.shadowBlur = 2;
+  ctx.fillText('Score: ' + score, W - 8, 14);
+  ctx.shadowBlur = 0;
+
+  // Progress bar
+  const prog = Math.min(1, distance / LEVEL_DIST);
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.fillRect(120, 7, 80, 6);
+  const pg = ctx.createLinearGradient(120, 0, 120 + 80 * prog, 0);
+  pg.addColorStop(0, '#CC3860'); pg.addColorStop(1, '#FF5888');
+  ctx.fillStyle = pg; ctx.fillRect(120, 7, 80 * prog, 6);
+  ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.lineWidth = 0.5;
+  ctx.strokeRect(120, 7, 80, 6);
+
+  // Letters count
+  ctx.fillStyle = '#FFD700'; ctx.font = '7px monospace'; ctx.textAlign = 'center';
+  ctx.shadowColor = '#000'; ctx.shadowBlur = 2;
+  ctx.fillText('\u2605 ' + lettersCollected + '/' + TOTAL_LETTERS, W / 2, 21);
+  ctx.shadowBlur = 0;
+}
+
+// ============================================================
+//  TITLE SCREEN
+// ============================================================
+function drawTitle() {
+  const t = gameTime || performance.now() / 1000;
+
+  // Sky gradient
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#1A0E28'); g.addColorStop(0.3, '#5A2848');
+  g.addColorStop(0.65, '#C06880'); g.addColorStop(1, '#FFD0C0');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  // Stars
+  for (let i = 0; i < 25; i++) {
+    const sx = (i * 41 + 17) % W, sy = (i * 13 + 5) % 70;
+    ctx.fillStyle = `rgba(255,255,255,${0.2 + Math.sin(t * 2 + i) * 0.3})`;
+    ctx.fillRect(sx, sy, 1, 1);
+  }
+
+  // Floating hearts
+  for (let i = 0; i < 10; i++) {
+    const hx = (20 + i * 32 + Math.sin(t * 0.4 + i) * 12) % W;
+    const hy = 30 + Math.sin(t * 0.6 + i * 1.2) * 20 + i * 4;
+    ctx.globalAlpha = 0.25 + Math.sin(t * 0.3 + i) * 0.1;
+    ctx.drawImage(sprHeart, Math.floor(hx - 5), Math.floor(hy - 4));
+    ctx.globalAlpha = 1;
+  }
+
+  // Ground + bg trees
+  ctx.fillStyle = '#1E3A1E'; ctx.fillRect(0, FOOT_Y - 4, W, H);
+  if (img.bgFront) {
+    ctx.globalAlpha = 0.5;
+    ctx.imageSmoothingEnabled = false;
+    const iw = img.bgFront.width, ih = img.bgFront.height;
+    ctx.drawImage(img.bgFront, 0, 0, iw, ih, 0, 0, Math.ceil(iw * (H / ih)), H);
+    ctx.globalAlpha = 1;
+  }
+
+  // Character + yorkies
+  if (img.playerIdle) {
+    drawSprite(img.playerIdle, PLAYER_FRAME.w, PLAYER_FRAME.h, Math.floor(t * 4) % PLAYER_IDLE_FRAMES, Math.floor(W / 2 - 16), Math.floor(FOOT_Y - 34), false, 1);
+  }
+  if (img.dog) {
+    drawSpriteRow(img.dog, DOG_FRAME.w, DOG_FRAME.h, Math.floor(t * 3) % 4, 0, Math.floor(W / 2 - 42), FOOT_Y - 18, false, 1);
+    drawSpriteRow(img.dog, DOG_FRAME.w, DOG_FRAME.h, Math.floor(t * 3 + 2) % 4, 0, Math.floor(W / 2 + 22), FOOT_Y - 18, true, 1);
+  }
+
+  // Heart above character
+  ctx.globalAlpha = 0.8;
+  ctx.drawImage(sprHeart, Math.floor(W / 2 - 5), Math.floor(FOOT_Y - 48 + Math.sin(t * 2) * 3));
+  ctx.globalAlpha = 1;
+
+  // Title text
+  ctx.fillStyle = '#FFF'; ctx.font = 'bold 16px monospace'; ctx.textAlign = 'center';
+  ctx.shadowColor = '#000'; ctx.shadowBlur = 4;
+  ctx.fillText('Valentines Day Game', W / 2, 38);
+  ctx.shadowBlur = 0;
+
+  ctx.fillStyle = '#FFB0C0'; ctx.font = '8px monospace';
+  ctx.fillText("A Valentine's Day Adventure", W / 2, 52);
+
+  if (Math.sin(t * 3) > 0) {
+    ctx.fillStyle = '#FFF'; ctx.font = '7px monospace';
+    ctx.fillText('TAP or PRESS SPACE', W / 2, H - 22);
+  }
+  ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.font = '5px monospace';
+  ctx.fillText('Left: move | Right: jump', W / 2, H - 10);
+}
+
+// ============================================================
+//  SURPRISE ENDING
+// ============================================================
+function drawSurprise() {
+  surpriseTimer += 1 / 60;
+  const fa = Math.min(1, surpriseTimer * 2);
+
+  if (surprisePhase === 0) {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#FFB6C1'); g.addColorStop(1, '#FF69B4');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    // Rising hearts
+    for (let i = 0; i < 25; i++) {
+      const hx = (i * 13 + 7) % W + Math.sin(surpriseTimer + i) * 8;
+      const hy = H - (surpriseTimer * 25 + i * 12) % (H + 30);
+      ctx.globalAlpha = 0.5;
+      ctx.drawImage(sprHeart, Math.floor(hx - 5), Math.floor(hy - 4));
+      ctx.globalAlpha = 1;
+    }
+    ctx.globalAlpha = fa;
+    ctx.fillStyle = '#FFF'; ctx.font = 'bold 13px monospace'; ctx.textAlign = 'center';
+    ctx.shadowColor = '#000'; ctx.shadowBlur = 3;
+    ctx.fillText('All Love Letters Found!', W / 2, H / 2 - 12);
+    ctx.font = '8px monospace'; ctx.fillText('Score: ' + score, W / 2, H / 2 + 8);
+    ctx.shadowBlur = 0;
+    if (surpriseTimer > 1.5 && Math.sin(surpriseTimer * 3) > 0) { ctx.font = '6px monospace'; ctx.fillText('tap to continue...', W / 2, H - 18); }
+    ctx.globalAlpha = 1;
+  } else if (surprisePhase === 1) {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#87CEEB'); g.addColorStop(1, '#D0F0E0');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    // Sun
+    ctx.fillStyle = '#FFF8D0'; ctx.beginPath(); ctx.arc(W - 35, 28, 14, 0, Math.PI * 2); ctx.fill();
+    // Trees bg
+    if (img.bgMid) { ctx.globalAlpha = 0.4; tileBg(img.bgMid, 0, 0); ctx.globalAlpha = 1; }
+    // Ground
+    ctx.fillStyle = '#243A1E'; ctx.fillRect(0, FOOT_Y, W, H);
+    ctx.fillStyle = '#4A8A30'; ctx.fillRect(0, FOOT_Y - 2, W, 4);
+    // Character + yorkies
+    if (img.playerIdle) drawSprite(img.playerIdle, PLAYER_FRAME.w, PLAYER_FRAME.h, 0, Math.floor(W / 2 - 16), Math.floor(FOOT_Y - 34), false, 1);
+    if (img.dog) {
+      drawSpriteRow(img.dog, DOG_FRAME.w, DOG_FRAME.h, 0, 0, Math.floor(W / 2 - 38), FOOT_Y - 18, false, 1);
+      drawSpriteRow(img.dog, DOG_FRAME.w, DOG_FRAME.h, 0, 0, Math.floor(W / 2 + 22), FOOT_Y - 18, true, 1);
+    }
+    ctx.globalAlpha = fa;
+    ctx.fillStyle = '#FF1744'; ctx.font = 'bold 11px monospace'; ctx.textAlign = 'center';
+    ctx.shadowColor = '#000'; ctx.shadowBlur = 3;
+    ctx.fillText("Happy Valentine's Day!", W / 2, 68);
+    ctx.shadowBlur = 0;
+    if (surpriseTimer > 1.5 && Math.sin(surpriseTimer * 3) > 0) { ctx.fillStyle = '#FFF'; ctx.font = '6px monospace'; ctx.fillText('tap to continue...', W / 2, H - 14); }
+    ctx.globalAlpha = 1;
+  } else if (surprisePhase === 2) {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#1A0E30'); g.addColorStop(0.5, '#3A1838'); g.addColorStop(1, '#120820');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    // Stars
+    for (let i = 0; i < 40; i++) {
+      ctx.fillStyle = `rgba(255,255,255,${0.2 + Math.sin(surpriseTimer * 2 + i) * 0.3})`;
+      ctx.fillRect((i * 31 + 13) % W, (i * 17 + 7) % (H * 0.65), 1, 1);
+    }
+    ctx.globalAlpha = fa;
+    ctx.fillStyle = '#FFB0C0'; ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center';
+    ctx.fillText('To My Love,', W / 2, H * 0.22);
+    ctx.fillStyle = '#FFF'; ctx.font = '7px monospace';
+    ["I can't wait to live all", 'the adventures that lay', 'ahead for us.', 'And all the farts as well.', '', 'You make my world', 'more beautiful.', '', 'I love you endlessly.'].forEach((l, i) => ctx.fillText(l, W / 2, H * 0.30 + i * 12));
+    ctx.fillStyle = '#FF69B4'; ctx.font = 'bold 8px monospace';
+    ctx.fillText('- Dylan', W / 2, H * 0.30 + 9 * 12 + 8);
+    if (surpriseTimer > 2 && Math.sin(surpriseTimer * 3) > 0) { ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.font = '6px monospace'; ctx.fillText('tap to continue...', W / 2, H - 10); }
+    ctx.globalAlpha = 1;
+  } else if (surprisePhase >= 3) {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#FF69B4'); g.addColorStop(1, '#FF1744');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    // Big pulsing heart
+    const pulse = 1 + Math.sin(surpriseTimer * 3) * 0.08;
+    const hs = Math.floor(64 * pulse);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(sprHeart, W / 2 - hs / 2, H / 2 - hs / 2 - 10, hs, hs);
+    ctx.fillStyle = '#FFF'; ctx.font = 'bold 14px monospace'; ctx.textAlign = 'center';
+    ctx.shadowColor = 'rgba(0,0,0,0.3)'; ctx.shadowBlur = 3;
+    ctx.fillText('Forever', W / 2, H / 2 - 10);
+    ctx.font = '9px monospace'; ctx.fillText('& Always', W / 2, H / 2 + 4);
+    ctx.shadowBlur = 0;
+    // Orbiting sparkles
+    for (let i = 0; i < 18; i++) {
+      const a = (i / 18) * Math.PI * 2 + surpriseTimer * 0.5;
+      const r = 42 + Math.sin(surpriseTimer * 2 + i) * 6;
+      ctx.fillStyle = `rgba(255,255,255,${0.3 + Math.sin(surpriseTimer * 3 + i) * 0.3})`;
+      ctx.fillRect(W / 2 + Math.cos(a) * r - 1, H / 2 - 10 + Math.sin(a) * r - 1, 2, 2);
+    }
+    if (surpriseTimer > 1 && Math.sin(surpriseTimer * 3) > 0) { ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '6px monospace'; ctx.fillText('tap to play again', W / 2, H - 14); }
+  }
+}
+
+// ============================================================
+//  NOTE POPUP (Pokemon-style discovery)
+// ============================================================
+let noteTimer = 0;
+function drawNote() {
+  noteTimer += 1 / 60;
+
+  // Draw frozen game behind
+  drawGame(); drawHUD();
+
+  // Dark overlay
+  ctx.fillStyle = 'rgba(0,0,0,0.65)';
+  ctx.fillRect(0, 0, W, H);
+
+  if (!currentNote) return;
+
+  const fadeIn = Math.min(1, noteTimer * 3);
+
+  // Panel dimensions
+  const pw = 200, ph = 148;
+  const px = Math.floor((W - pw) / 2);
+  const py = Math.floor((H - ph) / 2) - 4;
+
+  ctx.globalAlpha = fadeIn;
+
+  // Outer border (gold)
+  ctx.fillStyle = '#C8A020';
+  ctx.fillRect(px - 2, py - 2, pw + 4, ph + 4);
+
+  // Inner border (dark)
+  ctx.fillStyle = '#181828';
+  ctx.fillRect(px, py, pw, ph);
+
+  // Inner panel fill (dark blue like Pokemon item box)
+  ctx.fillStyle = '#202848';
+  ctx.fillRect(px + 2, py + 2, pw - 4, ph - 4);
+
+  // Top highlight line
+  ctx.fillStyle = '#4060A0';
+  ctx.fillRect(px + 2, py + 2, pw - 4, 1);
+
+  // Get the sprite for this item
+  var sprite = null;
+  if (currentNote.type === 'bolognese') sprite = sprBolognese;
+  else if (currentNote.type === 'celine') sprite = sprCeline;
+  else if (currentNote.type === 'balance') sprite = sprBalance;
+  else if (currentNote.type === 'boulder_final') sprite = sprHeart;
+
+  // Draw item sprite centered at top (scaled up 2x)
+  if (sprite) {
+    ctx.imageSmoothingEnabled = false;
+    const sw = sprite.width * 2, sh = sprite.height * 2;
+    ctx.drawImage(sprite, Math.floor(px + pw / 2 - sw / 2), py + 8, sw, sh);
+  }
+
+  // "You found:" header
+  ctx.fillStyle = '#FFD700';
+  ctx.font = 'bold 8px monospace';
+  ctx.textAlign = 'center';
+  ctx.shadowColor = '#000'; ctx.shadowBlur = 2;
+  ctx.fillText('You found: ' + currentNote.title + '!', px + pw / 2, py + 42);
+  ctx.shadowBlur = 0;
+
+  // Divider line
+  ctx.fillStyle = '#4060A0';
+  ctx.fillRect(px + 12, py + 47, pw - 24, 1);
+
+  // Note text (multi-line)
+  ctx.fillStyle = '#E0D8F0';
+  ctx.font = '6px monospace';
+  ctx.textAlign = 'center';
+  const lines = currentNote.note.split('\n');
+  for (var i = 0; i < lines.length; i++) {
+    ctx.fillText(lines[i], px + pw / 2, py + 58 + i * 10);
+  }
+
+  // "Tap to continue..." prompt (blinking)
+  if (noteTimer > 0.8 && Math.sin(noteTimer * 4) > 0) {
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.font = '5px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('Tap to continue...', px + pw / 2, py + ph - 6);
+  }
+
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+//  BOULDER SCENE
+// ============================================================
+function updateBoulder(dt) {
+  boulderTimer += dt;
+  if (boulderShake > 0) boulderShake -= dt;
+
+  if (boulderPhase === 2) {
+    // "Too heavy" message — pause then Dez enters
+    if (boulderTimer > 2) {
+      boulderPhase = 3;
+      boulderTimer = 0;
+      snd('surprise');
+      // Dez starts off screen to the right
+      dezBoulderX = camX + W + 30;
+    }
+  } else if (boulderPhase === 3) {
+    // Dez walking in from right — fast entrance
+    var targetX = BOULDER_X + boulderOffsetX + BOULDER_W / 2 + 25;
+    dezBoulderX -= 160 * dt;
+    if (dezBoulderX <= targetX) {
+      dezBoulderX = targetX;
+      if (boulderTimer > 0.8) {
+        boulderPhase = 4;
+        boulderTaps = 0;
+        boulderTimer = 0;
+      }
+    }
+  } else if (boulderPhase === 5) {
+    // Boulder sliding off screen
+    boulderOffsetX += 150 * dt;
+    if (boulderOffsetX > 400) {
+      boulderPhase = 6;
+      boulderTimer = 0;
+      // Position Dez next to player for walk
+      dezBoulderX = player.x + 30;
+    }
+  } else if (boulderPhase === 6) {
+    // Walk together to the right
+    var walkSpeed = 55;
+    player.x += walkSpeed * dt;
+    dezBoulderX += walkSpeed * dt;
+    // Animate player run
+    player.vx = walkSpeed;
+    player.facing = 1;
+    player.animTimer += dt * walkSpeed * 0.06;
+    player.frame = Math.floor(player.animTimer) % PLAYER_RUN_FRAMES;
+    // After walking a bit, trigger final note
+    if (boulderTimer > 3) {
+      boulderPhase = 7;
+      boulderTimer = 0;
+      player.vx = 0;
+      currentNote = {
+        type: 'boulder_final',
+        title: 'Together Forever',
+        note: "Life will always throw its\nchallenges at us, but I know\nthat as long as we have\neach other, we can get\nthrough anything."
+      };
+      noteTimer = 0;
+      boulderNoteActive = true;
+      state = 'note';
+    }
+  }
+
+  // Keep Dez position synced with boulder during push phases
+  if (boulderPhase === 4 || boulderPhase === 5) {
+    dezBoulderX = BOULDER_X + boulderOffsetX + BOULDER_W / 2 + 25;
+  }
+}
+
+function drawBoulder() {
+  updateBoulder(1 / 60);
+
+  // Keep camera centered on action
+  var targetCam;
+  if (boulderPhase === 6) {
+    // Follow players walking right
+    targetCam = player.x - W / 3;
+  } else {
+    targetCam = BOULDER_X + boulderOffsetX - W / 2;
+  }
+  camX += (targetCam - camX) * 0.05;
+
+  // Draw the game world behind
+  drawGame(); drawHUD();
+
+  // Dark overlay (subtle)
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.fillRect(0, 0, W, H);
+
+  // Phase-specific UI text
+  ctx.fillStyle = '#FFF';
+  ctx.font = 'bold 8px monospace';
+  ctx.textAlign = 'center';
+  ctx.shadowColor = '#000'; ctx.shadowBlur = 3;
+
+  if (boulderPhase === 1) {
+    // Solo pushing prompt
+    var promptAlpha = 0.7 + Math.sin(boulderTimer * 4) * 0.3;
+    ctx.globalAlpha = promptAlpha;
+    ctx.fillText('Tap SPACE to push!', W / 2, 30);
+    ctx.globalAlpha = 1;
+    // Strain indicator
+    ctx.fillStyle = '#FF8888';
+    ctx.font = '6px monospace';
+    if (boulderTaps > 0 && boulderTaps < 10) {
+      var strainText = boulderTaps < 4 ? 'ngh...' : boulderTaps < 7 ? 'hnng...!' : "it won't budge!";
+      ctx.fillText(strainText, W / 2, 42);
+    }
+  } else if (boulderPhase === 2) {
+    // Too heavy message
+    var fade = Math.min(1, boulderTimer * 2);
+    ctx.globalAlpha = fade;
+    ctx.fillStyle = '#FFB0B0';
+    ctx.fillText("It's too heavy alone...", W / 2, 36);
+    ctx.globalAlpha = 1;
+  } else if (boulderPhase === 3) {
+    // Dez entering
+    ctx.fillStyle = '#FFD700';
+    ctx.fillText('Dez appears!', W / 2, 30);
+    if (dezBoulderX <= BOULDER_X + boulderOffsetX + BOULDER_W / 2 + 30) {
+      ctx.fillStyle = '#FFF';
+      ctx.font = '6px monospace';
+      ctx.fillText('He grabs a rope to help pull!', W / 2, 42);
+    }
+  } else if (boulderPhase === 4) {
+    // Together prompt
+    var promptAlpha = 0.7 + Math.sin(boulderTimer * 4) * 0.3;
+    ctx.globalAlpha = promptAlpha;
+    ctx.fillStyle = '#90FF90';
+    ctx.fillText('Together! Tap SPACE!', W / 2, 30);
+    ctx.globalAlpha = 1;
+    // Progress indicator
+    var progress = Math.min(1, boulderOffsetX / 200);
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.fillRect(W / 2 - 40, 38, 80, 5);
+    ctx.fillStyle = '#90FF90';
+    ctx.fillRect(W / 2 - 40, 38, 80 * progress, 5);
+  } else if (boulderPhase === 6) {
+    // Walking together
+    var fade = Math.min(1, boulderTimer * 1.5);
+    ctx.globalAlpha = fade;
+    ctx.fillStyle = '#FFD0E0';
+    ctx.fillText('...', W / 2, 36);
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.shadowBlur = 0;
+}
+
+// ============================================================
+//  HUG SCENE
+// ============================================================
+function drawHug() {
+  hugTimer += 1 / 60;
+
+  // Background — warm sunset
+  var g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#FFB06A');
+  g.addColorStop(0.4, '#FF8866');
+  g.addColorStop(0.7, '#CC6688');
+  g.addColorStop(1, '#663366');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  // Sun
+  ctx.fillStyle = '#FFFAD0';
+  ctx.beginPath(); ctx.arc(W / 2, 50, 20, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = 0.3;
+  ctx.beginPath(); ctx.arc(W / 2, 50, 30, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // Ground
+  ctx.fillStyle = '#2A4A1E';
+  ctx.fillRect(0, FOOT_Y - 2, W, H);
+  ctx.fillStyle = '#4A8A30';
+  ctx.fillRect(0, FOOT_Y - 3, W, 4);
+
+  // Characters walking toward each other then hugging
+  var toriX, dezX, showHug = false;
+  var centerX = W / 2;
+
+  if (hugPhase === 0) {
+    // Walking toward each other
+    var walkT = Math.min(1, hugTimer / 2);
+    toriX = centerX - 50 + walkT * 40;
+    dezX = centerX + 50 - walkT * 40;
+    if (walkT >= 1) {
+      hugPhase = 1;
+      hugTimer = 0;
+    }
+  } else {
+    // Hugging (standing very close)
+    toriX = centerX - 10;
+    dezX = centerX + 10;
+    showHug = true;
+  }
+
+  // Draw Tori
+  if (img.playerIdle) {
+    var toriFi = hugPhase === 0 ? Math.floor(hugTimer * 6) % PLAYER_RUN_FRAMES : Math.floor(hugTimer * 4) % PLAYER_IDLE_FRAMES;
+    var toriSheet = hugPhase === 0 ? img.playerRun : img.playerIdle;
+    drawSprite(toriSheet, PLAYER_FRAME.w, PLAYER_FRAME.h, toriFi,
+      Math.floor(toriX - PLAYER_FRAME.w / 2), Math.floor(FOOT_Y - PLAYER_FRAME.h), false, 1);
+  }
+
+  // Draw Dez (taller + scaled up)
+  if (img.dezIdle) {
+    var dezFi = Math.floor(hugTimer * 3) % 4;
+    drawSprite(img.dezIdle, DEZ_FRAME.w, DEZ_FRAME.h, dezFi,
+      Math.floor(dezX - DEZ_FRAME.w * DEZ_SCALE / 2), Math.floor(FOOT_Y - DEZ_FRAME.h * DEZ_SCALE), true, DEZ_SCALE);
+  }
+
+  // Hearts floating up when hugging
+  if (showHug) {
+    for (var hi = 0; hi < 8; hi++) {
+      var hx = centerX + Math.sin(hugTimer * 1.5 + hi * 1.2) * 20;
+      var hy = FOOT_Y - 40 - ((hugTimer * 20 + hi * 12) % 60);
+      ctx.globalAlpha = 0.4 + Math.sin(hugTimer * 2 + hi) * 0.2;
+      ctx.drawImage(sprHeart, Math.floor(hx - 5), Math.floor(hy - 4));
+    }
+    ctx.globalAlpha = 1;
+
+    // Warm glow around them
+    ctx.globalAlpha = 0.2 + Math.sin(hugTimer * 1.5) * 0.08;
+    ctx.fillStyle = '#FFE0A0';
+    ctx.beginPath(); ctx.arc(centerX, FOOT_Y - 16, 30, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // Text
+  var fadeIn = Math.min(1, hugTimer * 1.5);
+  ctx.globalAlpha = fadeIn;
+  ctx.fillStyle = '#FFF';
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'center';
+  ctx.shadowColor = '#000'; ctx.shadowBlur = 3;
+
+  if (hugPhase === 0) {
+    ctx.fillText('...', centerX, 30);
+  } else {
+    ctx.fillText("Together, always.", centerX, 28);
+    // Tap to continue
+    if (hugTimer > 2 && Math.sin(hugTimer * 3) > 0) {
+      ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      ctx.font = '6px monospace';
+      ctx.fillText('tap to continue...', centerX, H - 14);
+      hugPhase = 2; // enable advancing
+    }
+  }
+
+  ctx.shadowBlur = 0;
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+//  MAIN DRAW
+// ============================================================
+function draw() {
+  let sx = 0, sy = 0;
+  if (screenShake > 0) { sx = (Math.random() - 0.5) * 4; sy = (Math.random() - 0.5) * 4; }
+  ctx.save();
+  ctx.scale(SCALE, SCALE);
+  ctx.translate(sx, sy);
+
+  if (state === 'loading') drawLoading();
+  else if (state === 'title') drawTitle();
+  else if (state === 'playing') { drawGame(); drawHUD(); }
+  else if (state === 'note') { drawNote(); }
+  else if (state === 'boulder') { drawBoulder(); }
+  else if (state === 'hug') { drawHug(); }
+  else if (state === 'surprise' || state === 'credits') drawSurprise();
+
+  ctx.restore();
+}
+
+function drawLoading() {
+  ctx.fillStyle = '#0A1A0D'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#FFF'; ctx.font = '8px monospace'; ctx.textAlign = 'center';
+  ctx.fillText('Loading...', W / 2, H / 2 - 10);
+  const prog = loadCount / totalImages;
+  ctx.fillStyle = 'rgba(255,255,255,0.2)'; ctx.fillRect(W / 2 - 50, H / 2, 100, 8);
+  ctx.fillStyle = '#FF69B4'; ctx.fillRect(W / 2 - 50, H / 2, 100 * prog, 8);
+}
+
+// ============================================================
+//  RESIZE
+// ============================================================
+function resizeCanvas() {
+  const aspect = W / H;
+  let cw = window.innerWidth, ch = window.innerHeight;
+  if (cw / ch > aspect) cw = Math.floor(ch * aspect);
+  else ch = Math.floor(cw / aspect);
+  canvas.style.width = cw + 'px';
+  canvas.style.height = ch + 'px';
+}
+
+// ============================================================
+//  INIT & LOOP
+// ============================================================
+function init() {
+  canvas.width = W * SCALE; canvas.height = H * SCALE;
+  resizeCanvas();
+  window.addEventListener('resize', resizeCanvas);
+
+  // Pre-render special sprites (hearts, letters, flowers)
+  prerenderSpecialSprites();
+
+  // Ambient motes
+  for (let i = 0; i < 25; i++) {
+    ambientMotes.push({
+      x: Math.random() * W, y: 20 + Math.random() * (FOOT_Y - 30),
+      vx: -3 + Math.random() * 6, vy: -2 + Math.random() * 4,
+      s: 1 + Math.random(), a: 0.2 + Math.random() * 0.4, ph: Math.random() * Math.PI * 2,
+    });
+  }
+
+  // Input
+  window.addEventListener('keydown', onKD);
+  window.addEventListener('keyup', onKU);
+  canvas.addEventListener('touchstart', onTS, { passive: false });
+  canvas.addEventListener('touchmove', onTM, { passive: false });
+  canvas.addEventListener('touchend', onTE, { passive: false });
+  canvas.addEventListener('click', onClick);
+
+  // Load images, generate custom character, then go to title
+  loadImages(() => {
+    generateCharacterSprites(); // Replace fox with custom Tori sprite
+    generateDezSprite();         // Dez waiting at the end
+    state = 'title';
+  });
+
+  requestAnimationFrame(loop);
+}
+
+let lastTime = 0;
+function loop(ts) {
+  const dt = Math.min(0.05, (ts - lastTime) / 1000);
+  lastTime = ts;
+  if (state === 'title' || state === 'loading' || state === 'boulder') gameTime = ts / 1000;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+init();
+</script>
+</body>
+</html>
